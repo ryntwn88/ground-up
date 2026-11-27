@@ -38,5 +38,6 @@ Open `godot/project.godot` in **Godot 4.7 (.NET / Mono Edition)** and press **F5
 - **`1` / `2` / `3`:** Hammer (sound rock solidity), Wire Brush (clean moss), Prybar (trundle hollow choss)
 - **`4`–`7` + Mouse Wheel or `[` `]`:** Select Cams (`#0.1`–`#4`), Pitons, Skyhooks, or Slings and cycle sizes
 - **`G`:** Weight placed gear/skyhook to hang and recover forearm pump
+- **`P`:** Cycle forearm pump intensity (`1.0x Standard` -> `0.5x Relaxed` -> `0.25x Low` -> `OFF` -> `1.5x Hardcore`)
 - **`R`:** Lower to ground and clean gear back onto rack
 - **`F3`:** Toggle developer physics telemetry (`mm`, `deg`, `kN`, CoM balance)

@@ -42,6 +42,8 @@ public partial class CliffGrayboxBuilder : Node3D
     private MeshInstance3D _ghostRightLobe = null!;
     private MeshInstance3D _ghostStem = null!;
     private StandardMaterial3D _ghostMaterial = null!;
+    private MeshInstance3D _climbCursorPip = null!;
+    private StandardMaterial3D _climbCursorPipMaterial = null!;
 
     public Node3D WallRoot { get; private set; } = null!;
 
@@ -107,8 +109,13 @@ public partial class CliffGrayboxBuilder : Node3D
         CliffFace cliff,
         ClimbingSession session,
         string? hoveredFeatureId,
-        float hoveredNormalizedPos)
+        float hoveredNormalizedPos,
+        bool? hoveredMoveIsValid = null)
     {
+        Color validHoverEmission = new(0.28f, 0.95f, 0.68f);
+        Color blockedHoverEmission = new(0.95f, 0.36f, 0.22f);
+        Color neutralHoverEmission = new(0.75f, 0.88f, 1.0f);
+
         foreach ((string id, FeatureVisualEntry entry) in _entries)
         {
             RockFeatureBase feature = entry.Feature;
@@ -143,8 +150,13 @@ public partial class CliffGrayboxBuilder : Node3D
             if (isHovered)
             {
                 entry.PrimaryMaterial.EmissionEnabled = true;
-                entry.PrimaryMaterial.Emission = new Color(0.75f, 0.88f, 1.0f);
-                entry.PrimaryMaterial.EmissionEnergyMultiplier = 0.32f;
+                entry.PrimaryMaterial.Emission = hoveredMoveIsValid switch
+                {
+                    true => validHoverEmission,
+                    false => blockedHoverEmission,
+                    null => neutralHoverEmission
+                };
+                entry.PrimaryMaterial.EmissionEnergyMultiplier = 0.34f;
             }
             else if (isAttached)
             {
@@ -165,6 +177,7 @@ public partial class CliffGrayboxBuilder : Node3D
             }
         }
 
+        UpdateClimbCursorPip(cliff, session, hoveredFeatureId, hoveredNormalizedPos, hoveredMoveIsValid);
         UpdatePlacementGhost(cliff, session, hoveredFeatureId, hoveredNormalizedPos);
     }
 
@@ -404,6 +417,60 @@ public partial class CliffGrayboxBuilder : Node3D
         _placementGhostRoot.AddChild(_ghostLeftLobe);
         _placementGhostRoot.AddChild(_ghostRightLobe);
         _placementGhostRoot.AddChild(_ghostStem);
+
+        _climbCursorPipMaterial = new StandardMaterial3D
+        {
+            Transparency = BaseMaterial3D.TransparencyEnum.Alpha,
+            AlbedoColor = new Color(0.28f, 0.95f, 0.68f, 0.82f),
+            EmissionEnabled = true,
+            Emission = new Color(0.25f, 0.92f, 0.65f),
+            EmissionEnergyMultiplier = 0.65f
+        };
+
+        _climbCursorPip = new MeshInstance3D
+        {
+            Name = "ClimbTargetPip",
+            Visible = false,
+            Mesh = new SphereMesh { Radius = 0.055f, Height = 0.11f },
+            MaterialOverride = _climbCursorPipMaterial
+        };
+        AddChild(_climbCursorPip);
+    }
+
+    private void UpdateClimbCursorPip(
+        CliffFace cliff,
+        ClimbingSession session,
+        string? hoveredFeatureId,
+        float hoveredNormalizedPos,
+        bool? hoveredMoveIsValid)
+    {
+        bool showPip = hoveredFeatureId is not null
+            && session.SelectedTool == ActiveToolKind.None
+            && session.Mode is SessionMode.Grounded or SessionMode.FreeClimbing or SessionMode.HangingOnGear;
+
+        if (!showPip)
+        {
+            _climbCursorPip.Visible = false;
+            return;
+        }
+
+        RockFeatureBase? feat = cliff.FindFeature(hoveredFeatureId!);
+        if (feat is null || feat.IsTrundled)
+        {
+            _climbCursorPip.Visible = false;
+            return;
+        }
+
+        Vector3 worldPos = cliff.GetFeatureWorldPositionMeters(feat, hoveredNormalizedPos).ToGodot();
+        _climbCursorPip.Visible = true;
+        _climbCursorPip.GlobalPosition = worldPos + (cliff.WallOutwardNormal.ToGodot() * 0.07f);
+
+        Color pipColor = hoveredMoveIsValid == false
+            ? new Color(0.95f, 0.32f, 0.22f, 0.82f)
+            : new Color(0.28f, 0.95f, 0.68f, 0.82f);
+
+        _climbCursorPipMaterial.AlbedoColor = pipColor;
+        _climbCursorPipMaterial.Emission = new Color(pipColor.R, pipColor.G, pipColor.B);
     }
 
     private void UpdatePlacementGhost(

@@ -99,6 +99,65 @@ public sealed class ClimberRigState
     }
 
     /// <summary>
+    /// Evaluates all candidate limbs against <see cref="CanReachAndUseFeature"/> and picks the highest-scoring
+    /// biomechanically natural limb (or validates <paramref name="manualOverride"/> directly when specified).
+    /// </summary>
+    public bool TrySelectBestReachableLimb(
+        CliffFace cliff,
+        RockFeatureBase feature,
+        float normalizedPosition,
+        LimbSlot? manualOverride,
+        out LimbSlot selectedLimb,
+        out string failureReason)
+    {
+        ArgumentNullException.ThrowIfNull(cliff);
+        ArgumentNullException.ThrowIfNull(feature);
+
+        Vector3 targetWorld = cliff.GetFeatureWorldPositionMeters(feature, normalizedPosition);
+
+        if (manualOverride.HasValue)
+        {
+            selectedLimb = manualOverride.Value;
+            return CanReachAndUseFeature(cliff, selectedLimb, feature, normalizedPosition, out failureReason);
+        }
+
+        LimbSlot[] allSlots = [LimbSlot.LeftHand, LimbSlot.RightHand, LimbSlot.LeftFoot, LimbSlot.RightFoot];
+        LimbSlot? bestSlot = null;
+        float bestScore = float.NegativeInfinity;
+        string? preferredFailure = null;
+        float bestInvalidIntentScore = float.NegativeInfinity;
+
+        foreach (LimbSlot candidate in allSlots)
+        {
+            float intentScore = ScoreLimbCandidate(candidate, feature, targetWorld);
+            if (CanReachAndUseFeature(cliff, candidate, feature, normalizedPosition, out string reason))
+            {
+                if (intentScore > bestScore)
+                {
+                    bestScore = intentScore;
+                    bestSlot = candidate;
+                }
+            }
+            else if (intentScore > bestInvalidIntentScore)
+            {
+                bestInvalidIntentScore = intentScore;
+                preferredFailure = reason;
+            }
+        }
+
+        if (bestSlot.HasValue)
+        {
+            selectedLimb = bestSlot.Value;
+            failureReason = string.Empty;
+            return true;
+        }
+
+        selectedLimb = SelectBestLimbForTarget(feature, targetWorld, null);
+        failureReason = preferredFailure ?? $"Cannot reach '{feature.Name}' from your current stance.";
+        return false;
+    }
+
+    /// <summary>
     /// Chooses the most natural hand or foot for a clicked 3D feature target unless overridden manually.
     /// </summary>
     public LimbSlot SelectBestLimbForTarget(
@@ -112,26 +171,8 @@ public sealed class ClimberRigState
             return manualOverride.Value;
         }
 
-        bool chooseFoot;
-        if (feature is StanceFeature && targetWorldMeters.Y <= CenterOfMassMeters.Y + 0.45f)
-        {
-            chooseFoot = true;
-        }
-        else if (feature is HornFeature)
-        {
-            chooseFoot = false;
-        }
-        else
-        {
-            chooseFoot = targetWorldMeters.Y < CenterOfMassMeters.Y + 0.05f;
-        }
-
-        if (chooseFoot)
-        {
-            return ChooseSide(LimbSlot.LeftFoot, LimbSlot.RightFoot, _lastMovedFoot, targetWorldMeters);
-        }
-
-        return ChooseSide(LimbSlot.LeftHand, LimbSlot.RightHand, _lastMovedHand, targetWorldMeters);
+        LimbSlot[] allSlots = [LimbSlot.LeftHand, LimbSlot.RightHand, LimbSlot.LeftFoot, LimbSlot.RightFoot];
+        return allSlots.OrderByDescending(slot => ScoreLimbCandidate(slot, feature, targetWorldMeters)).First();
     }
 
     /// <summary>
@@ -210,6 +251,12 @@ public sealed class ClimberRigState
         bool hasHands = maxHandY > float.MinValue;
         bool hasFeet = minFootY < float.MaxValue;
         bool isSummitTopout = string.Equals(feature.Id, "stance-summit-topout", StringComparison.Ordinal);
+
+        if (isHand && !hasFeet && !isSummitTopout)
+        {
+            failureReason = "Establish at least one foothold on the rock before pulling higher!";
+            return false;
+        }
 
         if (hasHands && hasFeet && !isSummitTopout && maxFootY > maxHandY + 0.15f)
         {
@@ -308,57 +355,101 @@ public sealed class ClimberRigState
         return MathF.Round(Math.Clamp(1.0f + penalty, 1.0f, 1.85f), 2);
     }
 
-    private LimbSlot ChooseSide(
-        LimbSlot leftSlot,
-        LimbSlot rightSlot,
-        LimbSlot? lastMovedSlot,
-        Vector3 targetWorldMeters)
+    private float ScoreLimbCandidate(LimbSlot slot, RockFeatureBase feature, Vector3 targetWorldMeters)
     {
-        bool leftAttached = _attachments.TryGetValue(leftSlot, out LimbAttachment left);
-        bool rightAttached = _attachments.TryGetValue(rightSlot, out LimbAttachment right);
+        bool isHand = IsHand(slot);
+        bool isLeft = IsLeft(slot);
+        bool isSummitTopout = string.Equals(feature.Id, "stance-summit-topout", StringComparison.Ordinal);
 
-        if (!leftAttached && rightAttached)
+        List<LimbAttachment> hands = _attachments.Values.Where(a => IsHand(a.Limb)).ToList();
+        List<LimbAttachment> feet = _attachments.Values.Where(a => !IsHand(a.Limb)).ToList();
+
+        float minHandY = hands.Count > 0 ? hands.Min(h => h.WorldPositionMeters.Y) : CenterOfMassMeters.Y + 0.35f;
+        float maxHandY = hands.Count > 0 ? hands.Max(h => h.WorldPositionMeters.Y) : CenterOfMassMeters.Y + 0.55f;
+        float minFootY = feet.Count > 0 ? feet.Min(f => f.WorldPositionMeters.Y) : CenterOfMassMeters.Y - 0.55f;
+        float maxFootY = feet.Count > 0 ? feet.Max(f => f.WorldPositionMeters.Y) : CenterOfMassMeters.Y - 0.45f;
+
+        float score = 0f;
+
+        // 1. Hand vs. Foot biomechanical zone scoring
+        if (isSummitTopout)
         {
-            return leftSlot;
+            score += isHand ? 40f : 20f;
+        }
+        else if (feature is StanceFeature)
+        {
+            score += isHand ? 5f : 45f;
+        }
+        else if (feature is HornFeature)
+        {
+            score += isHand ? 40f : -10f;
+        }
+        else
+        {
+            // Cracks & Edges: targets below both hands OR in the step-up zone below a high lead hand
+            // when feet are lagging behind (>= 1.15m below top hand) prioritize advancing a FOOT!
+            bool belowBothHands = targetWorldMeters.Y < minHandY - 0.08f;
+            bool stepUpZoneBelowLeadHand = (maxHandY - maxFootY >= 1.15f)
+                && (targetWorldMeters.Y < maxHandY - 0.32f)
+                && (targetWorldMeters.Y > maxFootY + 0.12f);
+
+            if ((belowBothHands || stepUpZoneBelowLeadHand) && targetWorldMeters.Y > minFootY - 0.35f)
+            {
+                score += !isHand ? 38f : -5f;
+            }
+            else if (targetWorldMeters.Y >= minHandY - 0.08f)
+            {
+                score += isHand ? 38f : -5f;
+            }
+            else
+            {
+                score += !isHand ? 28f : 0f;
+            }
         }
 
-        if (!rightAttached && leftAttached)
+        // 2. Left vs. Right side, flagging limb recovery, and natural alternation
+        LimbSlot partnerSlot = isHand
+            ? (isLeft ? LimbSlot.RightHand : LimbSlot.LeftHand)
+            : (isLeft ? LimbSlot.RightFoot : LimbSlot.LeftFoot);
+
+        bool selfAttached = _attachments.TryGetValue(slot, out LimbAttachment selfAtt);
+        bool partnerAttached = _attachments.TryGetValue(partnerSlot, out LimbAttachment partnerAtt);
+
+        if (!selfAttached && partnerAttached)
         {
-            return rightSlot;
+            // Strongly prefer planting an unattached/flagging limb!
+            score += 20f;
         }
-
-        if (leftAttached && rightAttached)
+        else if (selfAttached && partnerAttached)
         {
-            // Advance trailing lower limb when one limb lags noticeably behind.
-            float heightDiff = left.WorldPositionMeters.Y - right.WorldPositionMeters.Y;
-            if (heightDiff < -0.35f)
-            {
-                return leftSlot;
-            }
+            // Prefer advancing whichever hand/foot is currently lower so climbing alternates naturally.
+            float lagMeters = partnerAtt.WorldPositionMeters.Y - selfAtt.WorldPositionMeters.Y;
+            score += Math.Clamp(lagMeters * 16f, -14f, 14f);
 
-            if (heightDiff > 0.35f)
+            // Avoid re-moving a limb that is already sitting right on the clicked spot (enables hand/foot matching).
+            if (Vector3.Distance(selfAtt.WorldPositionMeters, targetWorldMeters) < 0.09f)
             {
-                return rightSlot;
-            }
-
-            // Otherwise prefer lateral side matching target X unless that exact limb just moved.
-            if (MathF.Abs(targetWorldMeters.X - CenterOfMassMeters.X) > 0.22f)
-            {
-                return targetWorldMeters.X <= CenterOfMassMeters.X ? leftSlot : rightSlot;
-            }
-
-            if (lastMovedSlot == leftSlot)
-            {
-                return rightSlot;
-            }
-
-            if (lastMovedSlot == rightSlot)
-            {
-                return leftSlot;
+                score -= 16f;
             }
         }
 
-        return targetWorldMeters.X <= CenterOfMassMeters.X ? leftSlot : rightSlot;
+        // Lateral side preference so arms and legs don't cross unnecessarily.
+        float lateralDelta = targetWorldMeters.X - CenterOfMassMeters.X;
+        if (MathF.Abs(lateralDelta) > 0.16f)
+        {
+            bool targetOnLeft = lateralDelta < 0f;
+            score += (isLeft == targetOnLeft) ? 8f : -4f;
+        }
+        else
+        {
+            LimbSlot? lastMoved = isHand ? _lastMovedHand : _lastMovedFoot;
+            if (lastMoved == partnerSlot)
+            {
+                score += 5f;
+            }
+        }
+
+        return score;
     }
 
     private void PruneOverstretchedTrailingFoot(CliffFace cliff, LimbSlot justMovedLimb)

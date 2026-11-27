@@ -26,6 +26,15 @@ public enum ActiveToolKind
     PlaceGear
 }
 
+public enum PumpDifficultyPreset
+{
+    Standard,
+    Relaxed,
+    Low,
+    Off,
+    Hardcore
+}
+
 public readonly record struct PlacedProtectionDetail(
     PlacedProtection Protection,
     float NormalizedFeaturePosition,
@@ -55,6 +64,8 @@ public sealed class ClimbingSession
     public GearSpecBase? SelectedGear { get; private set; }
     public PlacedProtectionDetail? ActiveWeightedPiece { get; private set; }
     public FallSimulationResult? LastFallResult { get; private set; }
+    public PumpDifficultyPreset PumpPreset { get; private set; } = PumpDifficultyPreset.Standard;
+    public float PumpDrainScale { get; private set; } = 1.0f;
     public float CurrentPumpRatePerSecond { get; private set; }
     public string StatusMessage { get; private set; } = "Standing on the ground pad. Click starting holds to begin climbing.";
 
@@ -76,6 +87,116 @@ public sealed class ClimbingSession
 
     public IReadOnlyList<PlacedProtection> ActiveProtectionChain =>
         _placedGear.Select(g => g.Protection).ToArray();
+
+    public static float GetScaleForPreset(PumpDifficultyPreset preset) => preset switch
+    {
+        PumpDifficultyPreset.Standard => 1.00f,
+        PumpDifficultyPreset.Relaxed => 0.50f,
+        PumpDifficultyPreset.Low => 0.25f,
+        PumpDifficultyPreset.Off => 0.00f,
+        PumpDifficultyPreset.Hardcore => 1.50f,
+        _ => 1.00f
+    };
+
+    public static string GetDisplayLabelForPreset(PumpDifficultyPreset preset) => preset switch
+    {
+        PumpDifficultyPreset.Standard => "1.0x Standard",
+        PumpDifficultyPreset.Relaxed => "0.5x Relaxed",
+        PumpDifficultyPreset.Low => "0.25x Low",
+        PumpDifficultyPreset.Off => "OFF (No Pump)",
+        PumpDifficultyPreset.Hardcore => "1.5x Hardcore",
+        _ => "1.0x Standard"
+    };
+
+    public void SetPumpPreset(PumpDifficultyPreset preset)
+    {
+        PumpPreset = preset;
+        PumpDrainScale = GetScaleForPreset(preset);
+        if (preset == PumpDifficultyPreset.Off)
+        {
+            Pump.AdvanceSeconds(100f, ClimberActionState.HangingOnGear, 0f);
+        }
+
+        if (Mode is SessionMode.FreeClimbing or SessionMode.StanceInspect or SessionMode.CleaningAndGear or SessionMode.HangingOnGear)
+        {
+            RefreshPumpRate();
+        }
+
+        StatusMessage = $"Pump intensity set to {GetDisplayLabelForPreset(preset)}.";
+    }
+
+    public PumpDifficultyPreset CyclePumpPreset()
+    {
+        PumpDifficultyPreset next = PumpPreset switch
+        {
+            PumpDifficultyPreset.Standard => PumpDifficultyPreset.Relaxed,
+            PumpDifficultyPreset.Relaxed => PumpDifficultyPreset.Low,
+            PumpDifficultyPreset.Low => PumpDifficultyPreset.Off,
+            PumpDifficultyPreset.Off => PumpDifficultyPreset.Hardcore,
+            _ => PumpDifficultyPreset.Standard
+        };
+
+        SetPumpPreset(next);
+        return next;
+    }
+
+    /// <summary>
+    /// Non-mutating preview of which limb would move (and whether the move is valid) if the player clicks <paramref name="featureId"/>.
+    /// </summary>
+    public bool PreviewLimbMove(
+        string featureId,
+        float normalizedPosition,
+        LimbSlot? manualLimbOverride,
+        out LimbSlot? predictedLimb,
+        out string diagnostic)
+    {
+        predictedLimb = null;
+        RockFeatureBase? feature = Cliff.FindFeature(featureId);
+        if (feature is null || feature.IsTrundled)
+        {
+            diagnostic = "Feature unavailable.";
+            return false;
+        }
+
+        normalizedPosition = Math.Clamp(normalizedPosition, 0f, 1f);
+        if (Mode == SessionMode.Grounded)
+        {
+            predictedLimb = LimbSlot.LeftHand;
+            diagnostic = "Step onto starting holds";
+            return true;
+        }
+
+        if (Mode == SessionMode.HangingOnGear)
+        {
+            Vector3 targetWorld = Cliff.GetFeatureWorldPositionMeters(feature, normalizedPosition);
+            float dist = Vector3.Distance(Rig.CenterOfMassMeters, targetWorld);
+            if (dist > 1.78f)
+            {
+                diagnostic = $"Out of reach from gear hang ({dist:F2}m).";
+                return false;
+            }
+
+            if (feature is CrackFeature thin && thin.SampleAtNormalized(normalizedPosition).WidthMillimeters < 6f)
+            {
+                diagnostic = "Incipient seam is too thin to pull onto.";
+                return false;
+            }
+
+            predictedLimb = manualLimbOverride ?? (feature is StanceFeature ? LimbSlot.RightFoot : LimbSlot.LeftHand);
+            diagnostic = $"Pull off gear -> {feature.Name}";
+            return true;
+        }
+
+        if (Rig.TrySelectBestReachableLimb(Cliff, feature, normalizedPosition, manualLimbOverride, out LimbSlot chosen, out string reason))
+        {
+            predictedLimb = chosen;
+            diagnostic = $"Move {chosen} -> {feature.Name}";
+            return true;
+        }
+
+        diagnostic = reason;
+        return false;
+    }
 
     /// <summary>
     /// Attaches the climber onto the nearest reachable low starting holds/stances and enters <see cref="SessionMode.FreeClimbing"/>.
@@ -168,9 +289,15 @@ public sealed class ClimbingSession
 
         normalizedPosition = Math.Clamp(normalizedPosition, 0f, 1f);
         Vector3 targetWorld = Cliff.GetFeatureWorldPositionMeters(feature, normalizedPosition);
-        LimbSlot limb = Rig.SelectBestLimbForTarget(feature, targetWorld, manualLimbOverride);
 
-        if (!Rig.CanReachAndUseFeature(Cliff, limb, feature, normalizedPosition, out string reason))
+        // Pulling off HangingOnGear via a direct hold click must re-establish BOTH hands and at least one foothold
+        // so the climber never enters a zero-foot floating state!
+        if (Mode == SessionMode.HangingOnGear)
+        {
+            return TryPullOffGearOntoFeature(feature, normalizedPosition, targetWorld, manualLimbOverride);
+        }
+
+        if (!Rig.TrySelectBestReachableLimb(Cliff, feature, normalizedPosition, manualLimbOverride, out LimbSlot limb, out string reason))
         {
             StatusMessage = reason;
             return false;
@@ -539,6 +666,16 @@ public sealed class ClimbingSession
         }
 
         RefreshPumpRate();
+        if (PumpPreset == PumpDifficultyPreset.Off || PumpDrainScale <= 0f)
+        {
+            if (CurrentPumpRatePerSecond < 0f)
+            {
+                Pump.AdvanceSeconds(deltaSeconds, ClimberActionState.HangingOnGear, 0f);
+            }
+
+            return;
+        }
+
         if (CurrentPumpRatePerSecond >= 0f)
         {
             float rawRate = ComputeBaseModelPumpRate();
@@ -679,12 +816,154 @@ public sealed class ClimbingSession
         return true;
     }
 
+    private bool TryPullOffGearOntoFeature(
+        RockFeatureBase clickedFeature,
+        float normalizedPosition,
+        Vector3 targetWorld,
+        LimbSlot? manualLimbOverride)
+    {
+        if (clickedFeature.IsTrundled)
+        {
+            StatusMessage = $"'{clickedFeature.Name}' has already been trundled.";
+            return false;
+        }
+
+        float reachFromHang = Vector3.Distance(Rig.CenterOfMassMeters, targetWorld);
+        if (reachFromHang > 1.78f)
+        {
+            StatusMessage = $"'{clickedFeature.Name}' is out of reach from your gear hang ({reachFromHang:F2}m).";
+            return false;
+        }
+
+        bool clickedAsFoot = manualLimbOverride is LimbSlot.LeftFoot or LimbSlot.RightFoot
+            || (manualLimbOverride is null && clickedFeature is StanceFeature && !string.Equals(clickedFeature.Id, "stance-summit-topout", StringComparison.Ordinal) && targetWorld.Y <= Rig.CenterOfMassMeters.Y + 0.35f);
+
+        if (clickedFeature is CrackFeature crackCheck)
+        {
+            float minW = clickedAsFoot ? 6.0f : 11.0f;
+            if (crackCheck.SampleAtNormalized(normalizedPosition).WidthMillimeters < minW)
+            {
+                StatusMessage = $"'{crackCheck.Name}' is too thin to pull onto.";
+                return false;
+            }
+        }
+
+        if (clickedFeature.IsHollowChoss && !clickedFeature.IsTrundled)
+        {
+            float fallHeight = MathF.Max(Rig.CenterOfMassMeters.Y, targetWorld.Y - 0.35f);
+            clickedFeature.TryTrundleWithPrybar();
+            TriggerWhipper(fallHeight, $"CHOSS BREAKOFF! '{clickedFeature.Name}' ripped off as you pulled off your gear!");
+            return false;
+        }
+
+        // Gather nearby solid climbable features so we plant both hands + at least one solid foothold!
+        List<(RockFeatureBase Feature, float Norm, Vector3 Pos)> nearby = [];
+        foreach (RockFeatureBase f in Cliff.Features.Where(f => !f.IsTrundled && !f.IsHollowChoss))
+        {
+            float norm = f is CrackFeature c ? c.GetNormalizedPositionForWorldHeight(targetWorld.Y - 0.65f) : 0.5f;
+            Vector3 pos = Cliff.GetFeatureWorldPositionMeters(f, norm);
+            if (Vector3.Distance(targetWorld, pos) <= 2.05f)
+            {
+                nearby.Add((f, norm, pos));
+            }
+        }
+
+        if (clickedAsFoot)
+        {
+            var handSupport = nearby
+                .Where(c => c.Feature is not StanceFeature
+                    && (c.Feature is not CrackFeature cf || cf.SampleAtNormalized(c.Norm).WidthMillimeters >= 11f)
+                    && c.Pos.Y >= targetWorld.Y + 0.20f
+                    && c.Pos.Y <= targetWorld.Y + 1.85f)
+                .OrderBy(c => Vector3.Distance(targetWorld + new Vector3(0f, 0.85f, 0f), c.Pos))
+                .FirstOrDefault();
+
+            if (handSupport.Feature is null)
+            {
+                StatusMessage = "No reachable handhold above that foothold to pull onto!";
+                return false;
+            }
+
+            LimbSlot footSlot = manualLimbOverride ?? (targetWorld.X <= Rig.CenterOfMassMeters.X ? LimbSlot.LeftFoot : LimbSlot.RightFoot);
+            Rig.SetLimbAttachment(Cliff, new LimbAttachment(footSlot, clickedFeature.Id, normalizedPosition, targetWorld));
+            Rig.SetLimbAttachment(Cliff, new LimbAttachment(LimbSlot.LeftHand, handSupport.Feature.Id, handSupport.Norm, handSupport.Pos));
+            float rhNorm = handSupport.Feature is CrackFeature ? Math.Clamp(handSupport.Norm + 0.06f, 0f, 1f) : handSupport.Norm;
+            Rig.SetLimbAttachment(Cliff, new LimbAttachment(LimbSlot.RightHand, handSupport.Feature.Id, rhNorm, Cliff.GetFeatureWorldPositionMeters(handSupport.Feature, rhNorm)));
+        }
+        else
+        {
+            var footSupport = nearby
+                .Where(c => (c.Feature is not CrackFeature cf || cf.SampleAtNormalized(c.Norm).WidthMillimeters >= 6f)
+                    && c.Pos.Y <= targetWorld.Y - 0.25f
+                    && c.Pos.Y >= targetWorld.Y - 1.95f)
+                .OrderByDescending(c => c.Feature is StanceFeature ? 1 : 0)
+                .ThenBy(c => Vector3.Distance(targetWorld + new Vector3(0f, -0.95f, 0f), c.Pos))
+                .FirstOrDefault();
+
+            if (footSupport.Feature is null && !string.Equals(clickedFeature.Id, "stance-summit-topout", StringComparison.Ordinal))
+            {
+                StatusMessage = "No reachable foothold below that hold to establish stance!";
+                return false;
+            }
+
+            LimbSlot primaryHand = manualLimbOverride is LimbSlot.LeftHand or LimbSlot.RightHand
+                ? manualLimbOverride.Value
+                : (targetWorld.X <= Rig.CenterOfMassMeters.X ? LimbSlot.LeftHand : LimbSlot.RightHand);
+            LimbSlot secondaryHand = primaryHand == LimbSlot.LeftHand ? LimbSlot.RightHand : LimbSlot.LeftHand;
+
+            Rig.SetLimbAttachment(Cliff, new LimbAttachment(primaryHand, clickedFeature.Id, normalizedPosition, targetWorld));
+
+            var partnerHandHold = nearby
+                .Where(c => c.Feature is not StanceFeature
+                    && (c.Feature is not CrackFeature cf || cf.SampleAtNormalized(c.Norm).WidthMillimeters >= 11f)
+                    && MathF.Abs(c.Pos.Y - targetWorld.Y) <= 0.75f)
+                .OrderBy(c => Vector3.Distance(targetWorld, c.Pos))
+                .FirstOrDefault();
+
+            if (partnerHandHold.Feature is not null)
+            {
+                float secNorm = ReferenceEquals(partnerHandHold.Feature, clickedFeature) && clickedFeature is CrackFeature
+                    ? Math.Clamp(normalizedPosition - 0.06f, 0f, 1f)
+                    : partnerHandHold.Norm;
+                Rig.SetLimbAttachment(Cliff, new LimbAttachment(secondaryHand, partnerHandHold.Feature.Id, secNorm, Cliff.GetFeatureWorldPositionMeters(partnerHandHold.Feature, secNorm)));
+            }
+            else
+            {
+                Rig.SetLimbAttachment(Cliff, new LimbAttachment(secondaryHand, clickedFeature.Id, normalizedPosition, targetWorld));
+            }
+
+            if (footSupport.Feature is not null)
+            {
+                LimbSlot footSlot = footSupport.Pos.X <= targetWorld.X ? LimbSlot.LeftFoot : LimbSlot.RightFoot;
+                Rig.SetLimbAttachment(Cliff, new LimbAttachment(footSlot, footSupport.Feature.Id, footSupport.Norm, footSupport.Pos));
+            }
+        }
+
+        ActiveWeightedPiece = null;
+        FreeWorkHand = null;
+        SelectedTool = ActiveToolKind.None;
+
+        if (string.Equals(clickedFeature.Id, "stance-summit-topout", StringComparison.Ordinal) ||
+            targetWorld.Y >= Cliff.HeightMeters - 0.25f)
+        {
+            Mode = SessionMode.ToppedOut;
+            CurrentPumpRatePerSecond = -6.0f;
+            StatusMessage = $"TOPPED OUT '{Cliff.Name}' cleanly!";
+            return true;
+        }
+
+        Mode = SessionMode.FreeClimbing;
+        RefreshPumpRate();
+        StatusMessage = $"Pulled off gear onto '{clickedFeature.Name}' with feet established.";
+        return true;
+    }
+
     private void RefreshPumpRate()
     {
         float raw = ComputeBaseModelPumpRate();
         if (raw > 0f)
         {
-            CurrentPumpRatePerSecond = MathF.Round(raw * Rig.ComputeBalancePumpMultiplier(), 2);
+            CurrentPumpRatePerSecond = MathF.Round(raw * Rig.ComputeBalancePumpMultiplier() * PumpDrainScale, 2);
         }
         else
         {

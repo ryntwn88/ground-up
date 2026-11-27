@@ -62,6 +62,7 @@ public partial class GrayboxSandboxController : Node3D
         _hud = new ClimbingHudController { Name = "ClimbingHUD" };
         _hud.ToggleStanceRequested += HandleToggleStance;
         _hud.WeightGearRequested += HandleWeightGear;
+        _hud.CyclePumpPresetRequested += () => _session.CyclePumpPreset();
         _hud.ResetClimbRequested += HandleFullReset;
         _hud.HotkeySlotPressed += HandleToolSlotSelected;
         AddChild(_hud);
@@ -175,21 +176,50 @@ public partial class GrayboxSandboxController : Node3D
         Vector3? inspectFocus = ResolveCloseUpCameraFocus();
         _cameraRig.UpdateCamera(_session, _climberRig.FocusPelvisWorldPosition, inspectFocus, dt);
 
+        bool? hoveredMoveValid = null;
+        LimbSlot? predictedLimb = null;
+        string? movePreviewDiag = null;
+        if (_hoveredFeatureId is not null &&
+            _session.SelectedTool == ActiveToolKind.None &&
+            _session.Mode is SessionMode.Grounded or SessionMode.FreeClimbing or SessionMode.HangingOnGear)
+        {
+            hoveredMoveValid = _session.PreviewLimbMove(
+                _hoveredFeatureId,
+                _hoveredNormalizedPos,
+                _manualLimbOverride,
+                out predictedLimb,
+                out movePreviewDiag);
+        }
+
         _cliffBuilder.TickDebris(dt);
-        _cliffBuilder.RefreshVisuals(_cliff, _session, _hoveredFeatureId, _hoveredNormalizedPos);
+        _cliffBuilder.RefreshVisuals(_cliff, _session, _hoveredFeatureId, _hoveredNormalizedPos, hoveredMoveValid);
 
         RockFeatureBase? hoveredFeature = _hoveredFeatureId is not null ? _cliff.FindFeature(_hoveredFeatureId) : null;
         PlacementEvaluation? hoveredEval = (_session.SelectedTool == ActiveToolKind.PlaceGear && _session.SelectedGear is not null && hoveredFeature is not null)
             ? _session.PreviewPlacement(_session.SelectedGear, hoveredFeature.Id, _hoveredNormalizedPos)
             : null;
 
-        _hud.UpdateHud(_session, _manualLimbOverride, hoveredFeature, _hoveredNormalizedPos, hoveredEval);
+        _hud.UpdateHud(
+            _session,
+            _manualLimbOverride,
+            hoveredFeature,
+            _hoveredNormalizedPos,
+            hoveredEval,
+            hoveredMoveValid,
+            predictedLimb,
+            movePreviewDiag);
     }
 
     private void InitializeSimulation()
     {
+        PumpDifficultyPreset preservedPreset = _session?.PumpPreset ?? PumpDifficultyPreset.Standard;
         _cliff = TestCliffFactory.CreateTenMeterGraniteWall();
         _session = new ClimbingSession(_cliff);
+        if (preservedPreset != PumpDifficultyPreset.Standard)
+        {
+            _session.SetPumpPreset(preservedPreset);
+        }
+
         _manualLimbOverride = null;
         _lockedInspectFeatureId = null;
     }
@@ -292,6 +322,9 @@ public partial class GrayboxSandboxController : Node3D
                 break;
             case Key.G:
                 HandleWeightGear();
+                break;
+            case Key.P:
+                _session.CyclePumpPreset();
                 break;
             case Key.R:
                 HandleFullReset();

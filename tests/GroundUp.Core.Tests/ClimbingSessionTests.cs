@@ -210,6 +210,139 @@ public sealed class ClimbingSessionTests
         Assert.Equal(4, session.PlacedGear.Count);
     }
 
+    [Fact]
+    public void SmartAutoCursor_ClimbsEntireWallAndPullsOffGear_WithZeroManualLimbOverrides()
+    {
+        CliffFace wall = TestCliffFactory.CreateTenMeterGraniteWall();
+        var session = new ClimbingSession(wall);
+
+        Assert.True(session.TryStepOntoWallFromGround());
+
+        // Every single move below passes manualLimbOverride: null!
+        Assert.True(session.TryMoveLimbToFeature("crack-main-splitter", 0.20f), session.StatusMessage);
+        Assert.True(session.TryMoveLimbToFeature("crack-main-splitter", 0.28f), session.StatusMessage);
+        Assert.True(session.TryMoveLimbToFeature("stance-low-ledge", 0.5f), session.StatusMessage);
+        Assert.True(session.TryMoveLimbToFeature("crack-main-splitter", 0.48f), session.StatusMessage);
+        Assert.True(session.TryMoveLimbToFeature("crack-main-splitter", 0.35f), session.StatusMessage); // Auto foot-jam below hands!
+        Assert.True(session.TryMoveLimbToFeature("crack-main-splitter", 0.72f), session.StatusMessage);
+        Assert.True(session.TryMoveLimbToFeature("stance-mid-left", 0.5f), session.StatusMessage);
+
+        Assert.True(session.TryLockThreePointStance());
+        Assert.True(session.TryBrushFeature("edge-mossy-sloper", 2.0f));
+        Assert.True(session.ReturnToFreeClimbing());
+
+        Assert.True(session.TryMoveLimbToFeature("edge-mossy-sloper", 0.5f), session.StatusMessage);
+        Assert.True(session.TryMoveLimbToFeature("edge-crux-crimp", 0.5f), session.StatusMessage);
+        Assert.True(session.TryMoveLimbToFeature("crack-main-splitter", 0.88f), session.StatusMessage); // Auto foot step-up!
+        Assert.True(session.TryMoveLimbToFeature("edge-seam-sidepull", 0.5f), session.StatusMessage);
+        Assert.True(session.TryMoveLimbToFeature("stance-upper-dime", 0.5f), session.StatusMessage);
+        Assert.True(session.TryMoveLimbToFeature("edge-crisp-hook", 0.5f), session.StatusMessage);
+
+        // Hang on skyhook at 7.6m, then click directly onto a hold WITHOUT pressing F first!
+        Assert.True(session.TryLockThreePointStance());
+        Assert.True(session.TryPlaceProtection(StandardRack.CliffhangerHook, "edge-crisp-hook", 0.5f, out var hook, out _));
+        Assert.True(session.TryWeightPlacedGear(hook!.Value.Protection.PlacementId));
+        Assert.Equal(SessionMode.HangingOnGear, session.Mode);
+
+        // Direct click from HangingOnGear must re-establish at least one foothold automatically!
+        Assert.True(session.TryMoveLimbToFeature("edge-crisp-hook", 0.5f), session.StatusMessage);
+        Assert.Equal(SessionMode.FreeClimbing, session.Mode);
+        Assert.True(session.Rig.AttachedFootCount >= 1);
+
+        Assert.True(session.TryMoveLimbToFeature("stance-high-step", 0.5f), session.StatusMessage);
+        Assert.True(session.TryMoveLimbToFeature("edge-high-latch", 0.5f), session.StatusMessage);
+        Assert.True(session.TryMoveLimbToFeature("horn-summit-knob", 0.5f), session.StatusMessage);
+        Assert.True(session.TryMoveLimbToFeature("stance-summit-foot", 0.5f), session.StatusMessage);
+        Assert.True(session.TryMoveLimbToFeature("stance-summit-topout", 0.5f), session.StatusMessage);
+
+        Assert.Equal(SessionMode.ToppedOut, session.Mode);
+    }
+
+    [Fact]
+    public void ClickingHoldFromGearHang_PreventsZeroFootCampusFloatingToSummit()
+    {
+        CliffFace wall = TestCliffFactory.CreateTenMeterGraniteWall();
+        var session = new ClimbingSession(wall);
+        Assert.True(session.TryStepOntoWallFromGround());
+
+        Assert.True(session.TryMoveLimbToFeature("crack-main-splitter", 0.22f));
+        Assert.True(session.TryMoveLimbToFeature("stance-low-ledge", 0.5f));
+        Assert.True(session.TryMoveLimbToFeature("crack-main-splitter", 0.52f));
+        Assert.True(session.TryMoveLimbToFeature("crack-main-splitter", 0.38f));
+        Assert.True(session.TryMoveLimbToFeature("crack-main-splitter", 0.72f));
+        Assert.True(session.TryMoveLimbToFeature("stance-mid-left", 0.5f));
+
+        Assert.True(session.TryLockThreePointStance());
+        Assert.True(session.TryPlaceProtection(StandardRack.Cam075, "crack-main-splitter", 0.75f, out var cam, out _));
+        Assert.True(session.TryWeightPlacedGear(cam!.Value.Protection.PlacementId));
+        Assert.Equal(SessionMode.HangingOnGear, session.Mode);
+
+        // Click directly onto edge-crux-crimp from the gear hang -> foot is automatically planted below.
+        Assert.True(session.TryMoveLimbToFeature("edge-crux-crimp", 0.5f));
+        Assert.True(session.Rig.AttachedFootCount >= 1);
+
+        // Attempting to click straight up the wall without advancing feet MUST fail rather than floating,
+        // and succeeds immediately once a foot is stepped up!
+        Assert.False(session.TryMoveLimbToFeature("edge-seam-sidepull", 0.5f));
+        Assert.True(session.TryMoveLimbToFeature("crack-main-splitter", 0.88f)); // Step foot up!
+        Assert.True(session.TryMoveLimbToFeature("edge-seam-sidepull", 0.5f));  // Now reach succeeds!
+        Assert.False(session.TryMoveLimbToFeature("horn-summit-knob", 0.5f));   // Still cannot float to summit!
+        Assert.NotEqual(SessionMode.ToppedOut, session.Mode);
+    }
+
+    [Fact]
+    public void SmartAutoCursor_ClickingCrackBelowHands_MovesFootInsteadOfPullingHandDown()
+    {
+        CliffFace wall = TestCliffFactory.CreateTenMeterGraniteWall();
+        var session = new ClimbingSession(wall);
+        Assert.True(session.TryStepOntoWallFromGround());
+
+        // Move both hands up to ~2.6m-2.9m while feet are still at ~0.5m.
+        Assert.True(session.TryMoveLimbToFeature("crack-main-splitter", 0.25f));
+        Assert.True(session.TryMoveLimbToFeature("crack-main-splitter", 0.32f));
+
+        float minHandBefore = session.Rig.Attachments.Values
+            .Where(a => ClimberRigState.IsHand(a.Limb))
+            .Min(a => a.WorldPositionMeters.Y);
+
+        // Click the crack at t=0.18 (~2.31m, below both hands): Smart Auto must step a FOOT up, leaving hands high!
+        Assert.True(session.TryMoveLimbToFeature("crack-main-splitter", 0.18f));
+
+        float minHandAfter = session.Rig.Attachments.Values
+            .Where(a => ClimberRigState.IsHand(a.Limb))
+            .Min(a => a.WorldPositionMeters.Y);
+        float maxFootAfter = session.Rig.Attachments.Values
+            .Where(a => !ClimberRigState.IsHand(a.Limb))
+            .Max(a => a.WorldPositionMeters.Y);
+
+        Assert.Equal(minHandBefore, minHandAfter, precision: 2);
+        Assert.True(maxFootAfter > 2.1f);
+    }
+
+    [Fact]
+    public void PumpDifficultyPreset_ScalesDrainAndOffPresetDisablesPumpOut()
+    {
+        CliffFace wall = TestCliffFactory.CreateTenMeterGraniteWall();
+        var session = new ClimbingSession(wall, initialPump: 40f);
+        Assert.True(session.TryStepOntoWallFromGround());
+        Assert.True(session.TryLockThreePointStance());
+
+        float standardRate = session.CurrentPumpRatePerSecond;
+        Assert.True(standardRate > 0f);
+
+        session.SetPumpPreset(PumpDifficultyPreset.Relaxed);
+        Assert.Equal(standardRate * 0.5f, session.CurrentPumpRatePerSecond, precision: 1);
+
+        session.SetPumpPreset(PumpDifficultyPreset.Hardcore);
+        Assert.Equal(standardRate * 1.5f, session.CurrentPumpRatePerSecond, precision: 1);
+
+        session.SetPumpPreset(PumpDifficultyPreset.Off);
+        Assert.Equal(0f, session.Pump.CurrentPump, precision: 2);
+        session.AdvanceTime(120f); // 2 full minutes locked off one-handed with Pump OFF!
+        Assert.Equal(0f, session.Pump.CurrentPump, precision: 2);
+        Assert.Equal(SessionMode.StanceInspect, session.Mode);
+    }
+
     private static ClimbingSession ClimbToMossySloperStance(CliffFace wall)
     {
         var session = new ClimbingSession(wall, initialPump: 35f);

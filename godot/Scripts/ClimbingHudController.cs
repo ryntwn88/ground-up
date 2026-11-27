@@ -20,6 +20,7 @@ public partial class ClimbingHudController : CanvasLayer
     private Label _limbModeLabel = null!;
     private Label _statusBannerLabel = null!;
     private Label _rackStatusLabel = null!;
+    private Button _pumpToggleButton = null!;
     private PanelContainer _telemetryPanel = null!;
     private Label _telemetryLabel = null!;
     private PanelContainer _helpPanel = null!;
@@ -29,6 +30,7 @@ public partial class ClimbingHudController : CanvasLayer
 
     public event Action? ToggleStanceRequested;
     public event Action? WeightGearRequested;
+    public event Action? CyclePumpPresetRequested;
     public event Action? ResetClimbRequested;
     public event Action<int>? HotkeySlotPressed;
 
@@ -42,7 +44,10 @@ public partial class ClimbingHudController : CanvasLayer
         LimbSlot? limbOverride,
         RockFeatureBase? hoveredFeature,
         float hoveredNorm,
-        PlacementEvaluation? hoveredGearEval)
+        PlacementEvaluation? hoveredGearEval,
+        bool? hoveredMoveValid = null,
+        LimbSlot? predictedLimb = null,
+        string? movePreviewDiagnostic = null)
     {
         _modeBadgeLabel.Text = session.Mode switch
         {
@@ -65,22 +70,43 @@ public partial class ClimbingHudController : CanvasLayer
             _ => new Color(0.92f, 0.22f, 0.22f)
         };
 
-        string trend = session.CurrentPumpRatePerSecond switch
-        {
-            > 2.5f => "▲▲ HEAVY DRAIN",
-            > 0.05f => "▲ PUMPING",
-            < -0.05f => "▼ RECOVERING",
-            _ => "• STEADY"
-        };
-        _pumpTrendLabel.Text = $"Forearm Pump: {pump:F0}% ({trend})";
+        string trend = session.PumpPreset == PumpDifficultyPreset.Off
+            ? "⏸ PUMP DISABLED"
+            : session.CurrentPumpRatePerSecond switch
+            {
+                > 2.5f => "▲▲ HEAVY DRAIN",
+                > 0.05f => "▲ PUMPING",
+                < -0.05f => "▼ RECOVERING",
+                _ => "• STEADY"
+            };
+        string presetBadge = ClimbingSession.GetDisplayLabelForPreset(session.PumpPreset);
+        _pumpTrendLabel.Text = $"Forearm Pump: {pump:F0}% ({trend})   |   Pump Mode [P]: {presetBadge}";
+        _pumpToggleButton.Text = session.PumpPreset == PumpDifficultyPreset.Off
+            ? "[P] Pump: OFF"
+            : $"[P] Pump: {session.PumpDrainScale:0.##}x";
 
         _limbModeLabel.Text = limbOverride.HasValue
             ? $"Limb Input: MANUAL OVERRIDE -> {limbOverride.Value}  (Press same key or Esc for Smart Auto)"
             : "Limb Input: SMART CURSOR AUTO  (Optional override: [Q] LH  [E] RH  [Z] LF  [C] RF)";
 
-        string hoverHint = hoveredFeature is not null
-            ? $"Aiming at: {hoveredFeature.Name}"
-            : "Aim cursor at a rock feature on the cliff";
+        string hoverHint;
+        if (hoveredFeature is null)
+        {
+            hoverHint = "Aim cursor at a rock feature on the cliff";
+        }
+        else if (hoveredMoveValid == true && predictedLimb.HasValue)
+        {
+            hoverHint = $"Aiming at: {hoveredFeature.Name}   [Click -> {predictedLimb.Value}]";
+        }
+        else if (hoveredMoveValid == false && !string.IsNullOrEmpty(movePreviewDiagnostic))
+        {
+            hoverHint = $"Aiming at: {hoveredFeature.Name}   [Blocked: {movePreviewDiagnostic}]";
+        }
+        else
+        {
+            hoverHint = $"Aiming at: {hoveredFeature.Name}";
+        }
+
         _statusBannerLabel.Text = $"{hoverHint}\n» {session.StatusMessage}";
 
         string selectedReadout = session.SelectedTool switch
@@ -211,8 +237,8 @@ public partial class ClimbingHudController : CanvasLayer
             AnchorRight = 0.5f,
             AnchorTop = 1.0f,
             AnchorBottom = 1.0f,
-            OffsetLeft = -530f,
-            OffsetRight = 530f,
+            OffsetLeft = -600f,
+            OffsetRight = 600f,
             OffsetTop = -98f,
             OffsetBottom = -14f
         };
@@ -233,6 +259,7 @@ public partial class ClimbingHudController : CanvasLayer
         AddBarButton(buttonRow, "[6] Skyhooks", () => HotkeySlotPressed?.Invoke(6));
         AddBarButton(buttonRow, "[7] Slings", () => HotkeySlotPressed?.Invoke(7));
         AddBarButton(buttonRow, "[G] Weight Gear", () => WeightGearRequested?.Invoke());
+        _pumpToggleButton = AddBarButton(buttonRow, "[P] Pump: 1x", () => CyclePumpPresetRequested?.Invoke());
         AddBarButton(buttonRow, "[R] Reset", () => ResetClimbRequested?.Invoke());
 
         _rackStatusLabel = new Label { HorizontalAlignment = HorizontalAlignment.Center };
@@ -256,7 +283,7 @@ public partial class ClimbingHudController : CanvasLayer
         var helpLabel = new Label
         {
             Text = "CONTROLS ([H] Hide)\n" +
-                   "• Left Click: Move Limb / Use Active Tool\n" +
+                   "• Left Click: Smart Move Limb / Use Tool\n" +
                    "• Right Drag: Orbit / Peek Camera\n" +
                    "• W / S: Scout Camera Up / Down\n" +
                    "• Q / E / Z / C: Force LH / RH / LF / RF\n" +
@@ -264,6 +291,7 @@ public partial class ClimbingHudController : CanvasLayer
                    "• 1-3: Hammer, Brush, Prybar\n" +
                    "• 4-7 + Wheel / [ ]: Rack Gear & Size\n" +
                    "• G: Weight Gear (Hang & Recover)\n" +
+                   "• P: Cycle Pump Scale (1x/0.5x/0.25x/Off/1.5x)\n" +
                    "• F3: Toggle Physics Telemetry"
         };
         _helpPanel.AddChild(helpLabel);
@@ -286,10 +314,11 @@ public partial class ClimbingHudController : CanvasLayer
         AddChild(_telemetryPanel);
     }
 
-    private static void AddBarButton(HBoxContainer row, string label, Action onClick)
+    private static Button AddBarButton(HBoxContainer row, string label, Action onClick)
     {
         var btn = new Button { Text = label, FocusMode = Control.FocusModeEnum.None };
         btn.Pressed += onClick;
         row.AddChild(btn);
+        return btn;
     }
 }
