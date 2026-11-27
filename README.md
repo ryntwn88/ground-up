@@ -6,7 +6,7 @@
 
 - `src/GroundUp.Core/` — Engine-agnostic C# simulation core:
   - **Semantic Geology:** Parametric rock types (`Granite`, `Sandstone`, `Limestone`, `Basalt`), cracks/seams, edges/flakes/choss, horns, stances, and surface moss/dirt masks.
-  - **Protection Physics:** Cam lobe expansion ranges (`#0.1`–`#6`), flare & friability penalties, skyhook lip-angle stability, piton seam holding power, and horn slings.
+  - **Protection Physics:** Cam lobe expansion ranges (`#0.1`–`#4`), flare & friability penalties, skyhook lip-angle stability, piton seam holding power, and horn slings.
   - **Rope & Fall Dynamics:** Automated ground-anchor lead-solo tether, dynamic rope stretch, Fall Factor (`FF`), peak `kN` impact force, and sequential gear zippering cascades.
   - **Forearm Stamina & Pump:** Continuous pump accumulation from wall overhang, hold ergonomics, and one-handed stance locks vs. stance/gear recovery.
 - `tests/GroundUp.Core.Tests/` — Deterministic xUnit test suite verifying climbing, gear-weighting, whipper, zippering, and stamina scenarios.

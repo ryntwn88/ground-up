@@ -63,7 +63,7 @@ Instead of relying on external scan datasets, *Ground Up!* generates its own gro
 - [x] **Protection Physics v1:** Cam lobe expansion range curves (`#0.1` to `#4`), flare & rock-friability multipliers, skyhook lip-angle slip thresholds, piton seam deformation, and horn sling pull-out security.
 - [x] **Fall & Rope Impulse Calculator:** Dynamic rope elongation, Fall Factor, peak kN impact on top piece, and sequential gear zippering cascades.
 - [x] **Stamina / Pump Model:** Continuous forearm pump accumulation from wall overhang + grip difficulty + one-handed stance locks vs. recovery on ledges or while hanging on gear.
-- [x] **Exit Gate:** Automated CLI xUnit suite simulating 24 climbing, aid-weighting, whipper, and stamina scenarios.
+- [x] **Exit Gate:** Automated CLI xUnit suite simulating 33 climbing, aid-weighting, whipper, and stamina scenarios.
 
 ### Phase 1: "The 10-Meter Graybox Wall" — First Playable (Weeks 3-8)
 - Static 3D graybox cliff in Godot 4 with semantic test features (splitter crack, flaring seam, hookable edges, horn, stances, moss, hollow choss flake).

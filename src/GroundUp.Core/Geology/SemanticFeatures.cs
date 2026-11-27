@@ -98,7 +98,7 @@ public abstract class RockFeatureBase
             _ => ResonanceType.HollowBoom
         };
 
-        return new RockSoundingResult(resonance, pitchHz, AdvisesTrundle: IsHollowChoss);
+        return new RockSoundingResult(resonance, pitchHz, AdvisesTrundle: IsHollowChoss && !IsTrundled);
     }
 
     /// <summary>
@@ -155,7 +155,25 @@ public sealed class CrackFeature : RockFeatureBase
 
     public IReadOnlyList<CrackPoint> Profile => _profile;
 
+    public float MinWorldHeightMeters => PositionMeters.Y + _profile[0].HeightOffsetMeters;
+
+    public float MaxWorldHeightMeters => PositionMeters.Y + _profile[^1].HeightOffsetMeters;
+
     public float TotalLengthMeters => _profile[^1].HeightOffsetMeters - _profile[0].HeightOffsetMeters;
+
+    public float GetNormalizedPositionForWorldHeight(float worldHeightMeters)
+    {
+        float length = TotalLengthMeters;
+        if (length <= 0.0001f)
+        {
+            return 0f;
+        }
+
+        return Math.Clamp((worldHeightMeters - MinWorldHeightMeters) / length, 0f, 1f);
+    }
+
+    public CrackSample SampleAtWorldHeight(float worldHeightMeters) =>
+        SampleAtNormalized(GetNormalizedPositionForWorldHeight(worldHeightMeters));
 
     public CrackSample SampleAtNormalized(float t)
     {
@@ -312,7 +330,10 @@ public sealed class CliffFace
 
         if (features is not null)
         {
-            _features.AddRange(features);
+            foreach (RockFeatureBase feature in features)
+            {
+                AddFeature(feature);
+            }
         }
     }
 
@@ -321,6 +342,26 @@ public sealed class CliffFace
     public void AddFeature(RockFeatureBase feature)
     {
         ArgumentNullException.ThrowIfNull(feature);
+        if (_features.Any(existing => string.Equals(existing.Id, feature.Id, StringComparison.Ordinal)))
+        {
+            throw new ArgumentException($"A feature with ID '{feature.Id}' already exists on cliff '{Name}'.", nameof(feature));
+        }
+
         _features.Add(feature);
+    }
+
+    public RockFeatureBase? FindFeature(string id)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(id);
+        return _features.FirstOrDefault(f => string.Equals(f.Id, id, StringComparison.Ordinal));
+    }
+
+    public T GetFeature<T>(string id) where T : RockFeatureBase
+    {
+        RockFeatureBase feature = FindFeature(id)
+            ?? throw new KeyNotFoundException($"Feature '{id}' was not found on cliff '{Name}'.");
+
+        return feature as T
+            ?? throw new InvalidOperationException($"Feature '{id}' is of type '{feature.GetType().Name}', expected '{typeof(T).Name}'.");
     }
 }

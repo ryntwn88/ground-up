@@ -166,4 +166,73 @@ public sealed class ProtectionPhysicsTests
         Assert.Equal(PlacementQuality.SketchyBodyWeightOnly, chossBolt.Quality);
         Assert.True(chossBolt.EffectiveHoldingForceKilonewtons < 4.0f);
     }
+
+    [Fact]
+    public void StandardRack_AllCams_ProvideContinuousOverlappingUsableWidthCoverage()
+    {
+        IReadOnlyList<CamSpec> cams = StandardRack.AllCams;
+        for (int i = 0; i < cams.Count - 1; i++)
+        {
+            CamSpec smaller = cams[i];
+            CamSpec larger = cams[i + 1];
+
+            float smallerMaxUsable = smaller.MaxWidthMillimeters - ((smaller.MaxWidthMillimeters - smaller.MinWidthMillimeters) * 0.05f);
+            float largerMinUsable = larger.MinWidthMillimeters + ((larger.MaxWidthMillimeters - larger.MinWidthMillimeters) * 0.06f);
+
+            Assert.True(
+                smallerMaxUsable > largerMinUsable,
+                $"Gap detected between {smaller.Code} (max usable {smallerMaxUsable:F2}mm) and {larger.Code} (min usable {largerMinUsable:F2}mm).");
+        }
+
+        var fingerCrack = new CrackFeature(
+            "crack-13mm",
+            "13.2mm Finger Tip Crack",
+            new Vector3(0, 4f, 0),
+            [new CrackPoint(0f, WidthMillimeters: 13.2f, FlareDegrees: 1f, DepthMillimeters: 35f)]);
+
+        PlacementEvaluation cam02Eval = ProtectionEvaluator.EvaluateCam(StandardRack.Cam02, fingerCrack, 0f, GeologyProfile.Granite);
+        Assert.True(cam02Eval.FitsGeometry);
+        Assert.True(cam02Eval.HoldsBodyWeight());
+    }
+
+    [Fact]
+    public void EvaluateSkyhook_MarginalSandstoneSloper_QualityMatchesHoldsBodyWeight()
+    {
+        var marginalSandstoneLip = new EdgeFeature(
+            "sandstone-sloper",
+            "Friable Sloping Sandstone Lip",
+            new Vector3(0, 5f, 0),
+            widthMillimeters: 30f,
+            depthMillimeters: 5f,
+            incutDegrees: -6f);
+
+        PlacementEvaluation eval = ProtectionEvaluator.EvaluateSkyhook(
+            StandardRack.TalonHook,
+            marginalSandstoneLip,
+            GeologyProfile.Sandstone);
+
+        Assert.False(eval.HoldsBodyWeight(climberMassKg: 78f));
+        Assert.Equal(PlacementQuality.Unusable, eval.Quality);
+    }
+
+    [Fact]
+    public void EvaluateSling_MossyMarginalHornSlips_UntilWireBrushed()
+    {
+        var mossyKnob = new HornFeature(
+            "knob-mossy",
+            "Slime-Coated Shallow Knob",
+            new Vector3(0, 6f, 0),
+            neckRadiusMillimeters: 28f,
+            collarAngleDegrees: -5f,
+            surface: new SurfaceCondition(mossCoverage: 0.85f, dirtCoverage: 0.40f));
+
+        PlacementEvaluation dirtyEval = ProtectionEvaluator.EvaluateSling(StandardRack.Dyneema60, mossyKnob, GeologyProfile.Granite);
+        Assert.False(dirtyEval.FitsGeometry);
+        Assert.Equal(PlacementQuality.Unusable, dirtyEval.Quality);
+
+        mossyKnob.Surface.BrushClean(2.0f);
+        PlacementEvaluation cleanEval = ProtectionEvaluator.EvaluateSling(StandardRack.Dyneema60, mossyKnob, GeologyProfile.Granite);
+        Assert.True(cleanEval.FitsGeometry);
+        Assert.True(cleanEval.HoldsBodyWeight());
+    }
 }

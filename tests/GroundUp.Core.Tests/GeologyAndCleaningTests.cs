@@ -1,5 +1,6 @@
 using System.Numerics;
 using GroundUp.Core.Geology;
+using GroundUp.Core.Samples;
 using Xunit;
 
 namespace GroundUp.Core.Tests;
@@ -96,5 +97,48 @@ public sealed class GeologyAndCleaningTests
         Assert.True(GeologyProfile.Granite.DrillHardness > GeologyProfile.Limestone.DrillHardness);
         Assert.True(GeologyProfile.Limestone.DrillHardness > GeologyProfile.Sandstone.DrillHardness);
         Assert.True(GeologyProfile.Sandstone.Friability > GeologyProfile.Granite.Friability);
+    }
+
+    [Fact]
+    public void SoundRock_AfterTrundlingFlake_NoLongerAdvisesTrundle()
+    {
+        var chossFlake = new EdgeFeature("flake-1", "Hollow Flake", new Vector3(0, 4f, 0), 100f, 22f, 12f, structuralIntegrity: 0.25f);
+        Assert.True(chossFlake.SoundRock().AdvisesTrundle);
+
+        Assert.True(chossFlake.TryTrundleWithPrybar());
+        Assert.False(chossFlake.SoundRock().AdvisesTrundle);
+    }
+
+    [Fact]
+    public void CrackFeature_SampleAtWorldHeight_MapsNonZeroProfileOffsetsCorrectly()
+    {
+        var crack = new CrackFeature(
+            "crack-offset",
+            "Offset Crack",
+            new Vector3(0, 3.0f, 0),
+            [
+                new CrackPoint(HeightOffsetMeters: 1.0f, WidthMillimeters: 20.0f, FlareDegrees: 2.0f, DepthMillimeters: 50.0f),
+                new CrackPoint(HeightOffsetMeters: 3.0f, WidthMillimeters: 30.0f, FlareDegrees: 6.0f, DepthMillimeters: 40.0f)
+            ]);
+
+        Assert.Equal(4.0f, crack.MinWorldHeightMeters, precision: 2);
+        Assert.Equal(6.0f, crack.MaxWorldHeightMeters, precision: 2);
+
+        CrackSample mid = crack.SampleAtWorldHeight(5.0f);
+        Assert.Equal(5.0f, mid.WorldHeightMeters, precision: 2);
+        Assert.Equal(25.0f, mid.WidthMillimeters, precision: 2);
+    }
+
+    [Fact]
+    public void CliffFace_EnforcesUniqueFeatureIds_AndSupportsTypedLookup()
+    {
+        CliffFace wall = TestCliffFactory.CreateTenMeterGraniteWall();
+
+        var splitter = wall.GetFeature<CrackFeature>("crack-main-splitter");
+        Assert.Equal("crack-main-splitter", splitter.Id);
+        Assert.Null(wall.FindFeature("non-existent-id"));
+
+        Assert.Throws<ArgumentException>(() =>
+            wall.AddFeature(new EdgeFeature("crack-main-splitter", "Duplicate ID", Vector3.Zero, 30f, 10f, 5f)));
     }
 }

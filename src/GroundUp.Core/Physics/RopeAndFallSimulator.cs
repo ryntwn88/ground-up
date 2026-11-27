@@ -34,9 +34,9 @@ public static class RopeAndFallSimulator
 
     /// <summary>
     /// Calibrated UIAA single dynamic rope modulus (~29 kN) so an 80kg Factor 1.77 fall
-    /// produces ~8.7 kN peak force on the climber and ~13.9 kN pulley load on the top anchor.
+    /// stays safely below the 12 kN UIAA peak climber force limit while testing top anchors near ~14-15 kN.
     /// </summary>
-    private const float DefaultDynamicRopeModulusKn = 29.0f;
+    private const float DefaultDynamicRopeModulusKilonewtons = 29.0f;
 
     /// <summary>
     /// Pulley multiplier at the highest protection carabiner (~1.60x accounting for carabiner/tether friction).
@@ -48,12 +48,13 @@ public static class RopeAndFallSimulator
         IReadOnlyList<PlacedProtection> activeProtectionChain,
         float climberMassKg = 78f,
         float slackMeters = 0.25f,
-        float ropeModulusKn = DefaultDynamicRopeModulusKn)
+        float ropeModulusKilonewtons = DefaultDynamicRopeModulusKilonewtons)
     {
         ArgumentNullException.ThrowIfNull(activeProtectionChain);
         climberHeightMeters = Math.Max(0f, climberHeightMeters);
         climberMassKg = Math.Max(35f, climberMassKg);
         slackMeters = Math.Max(0f, slackMeters);
+        ropeModulusKilonewtons = Math.Max(5f, ropeModulusKilonewtons);
 
         // Sort protection highest-first so falls test the top piece first and zipper downward on blowouts.
         List<PlacedProtection> orderedChain = activeProtectionChain
@@ -118,20 +119,22 @@ public static class RopeAndFallSimulator
                 initialFallFactor = MathF.Round(rawFallFactor, 2);
             }
 
-            // Kinetic energy at rope-taut point minus energy bled off by prior blown pieces (approx 0.12m deformation per blown piece).
+            // Kinetic energy at rope-taut point minus energy bled off by prior blown pieces (~0.10m tear-out deformation per blown piece).
             float potentialEnergyKj = climberWeightKn * Math.Max(0f, freeFallDistance);
             float remainingEnergyKj = Math.Max(0.02f, potentialEnergyKj - dissipatedEnergyKilojoules);
             float effectiveFallFactor = remainingEnergyKj / (climberWeightKn * activeRopeLengthMeters);
 
-            float climberImpactKn = climberWeightKn * (1.0f + MathF.Sqrt(1.0f + (2.0f * ropeModulusKn * effectiveFallFactor / climberWeightKn)));
+            float climberImpactKn = climberWeightKn * (1.0f + MathF.Sqrt(1.0f + (2.0f * ropeModulusKilonewtons * effectiveFallFactor / climberWeightKn)));
             float pieceLoadKn = climberImpactKn * CarabinerPulleyFactor;
-
-            peakClimberKn = Math.Max(peakClimberKn, MathF.Round(climberImpactKn, 2));
-            peakPieceKn = Math.Max(peakPieceKn, MathF.Round(pieceLoadKn, 2));
 
             if (pieceLoadKn > candidate.EffectiveHoldingForceKilonewtons)
             {
-                // Piece blows! Record blowout, bleed small tear-out energy, and continue zippering to next piece down.
+                // Piece blows at its failure limit! Cap transmitted rope forces to what the piece actually resisted before popping.
+                float transmittedPieceKn = candidate.EffectiveHoldingForceKilonewtons;
+                float transmittedClimberKn = transmittedPieceKn / CarabinerPulleyFactor;
+                peakClimberKn = Math.Max(peakClimberKn, MathF.Round(transmittedClimberKn, 2));
+                peakPieceKn = Math.Max(peakPieceKn, MathF.Round(transmittedPieceKn, 2));
+
                 blownPieces.Add(new BlownPieceRecord(
                     candidate.PlacementId,
                     candidate.Gear.Code,
@@ -142,6 +145,9 @@ public static class RopeAndFallSimulator
                 dissipatedEnergyKilojoules += candidate.EffectiveHoldingForceKilonewtons * 0.10f;
                 continue;
             }
+
+            peakClimberKn = Math.Max(peakClimberKn, MathF.Round(climberImpactKn, 2));
+            peakPieceKn = Math.Max(peakPieceKn, MathF.Round(pieceLoadKn, 2));
 
             // Piece holds! Compute dynamic rope elongation (accounting for carabiner friction along the lower strand)
             // to verify the climber does not stretch into the ground.
@@ -159,7 +165,7 @@ public static class RopeAndFallSimulator
                     InitialFallFactor: initialFallFactor,
                     PeakClimberImpactKilonewtons: peakClimberKn,
                     PeakTopPieceLoadKilonewtons: peakPieceKn,
-                    CatchingPlacementId: candidate.PlacementId,
+                    CatchingPlacementId: null,
                     BlownPieces: blownPieces);
             }
 

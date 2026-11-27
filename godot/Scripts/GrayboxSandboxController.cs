@@ -87,10 +87,11 @@ public partial class GrayboxSandboxController : Node3D
             {
                 case CrackFeature crack:
                     float length = Mathf.Max(0.4f, crack.TotalLengthMeters);
+                    float centerY = (crack.MinWorldHeightMeters + crack.MaxWorldHeightMeters) * 0.5f;
                     Color crackColor = crack.SampleAtNormalized(0f).WidthMillimeters < 10f
                         ? new Color(0.95f, 0.62f, 0.18f) // Orange = thin piton seam
                         : new Color(0.18f, 0.72f, 0.95f); // Cyan = splitter crack
-                    AddBoxMeshTo(wallRoot, crack.Id, new Vector3(0.08f, length, 0.12f), pos + new Vector3(0f, length * 0.5f, 0f), crackColor);
+                    AddBoxMeshTo(wallRoot, crack.Id, new Vector3(0.08f, length, 0.12f), new Vector3(pos.X, centerY, pos.Z), crackColor);
                     break;
 
                 case EdgeFeature edge:
@@ -124,9 +125,9 @@ public partial class GrayboxSandboxController : Node3D
 
     private void BuildDiagnosticsOverlay()
     {
-        var crack = (CrackFeature)_cliff.Features[1];
-        var hookEdge = (EdgeFeature)_cliff.Features[3];
-        var chossFlake = (EdgeFeature)_cliff.Features[5];
+        var crack = _cliff.GetFeature<CrackFeature>("crack-main-splitter");
+        var hookEdge = _cliff.GetFeature<EdgeFeature>("edge-crisp-hook");
+        var chossFlake = _cliff.GetFeature<EdgeFeature>("flake-hollow-choss");
 
         PlacementEvaluation camEval = ProtectionEvaluator.EvaluateCam(StandardRack.Cam075, crack, 0.5f, _cliff.Geology);
         PlacementEvaluation hookEval = ProtectionEvaluator.EvaluateSkyhook(StandardRack.CliffhangerHook, hookEdge, _cliff.Geology);

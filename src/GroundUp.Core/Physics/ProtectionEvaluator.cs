@@ -194,7 +194,7 @@ public static class ProtectionEvaluator
         float crystalStrengthFactor = (1.0f - (geology.Friability * 0.85f)) * edge.StructuralIntegrity;
         float finalHoldKn = MathF.Round(hook.RatedStrengthKilonewtons * incutFactor * crystalStrengthFactor, 2);
 
-        if (finalHoldKn < 0.85f)
+        if (finalHoldKn < 1.05f)
         {
             return new PlacementEvaluation(hook, edge.Id, edge.PositionMeters.Y, FitsGeometry: true, finalHoldKn,
                 PlacementQuality.Unusable, $"Rock lip crumbles or skates at {finalHoldKn:F2} kN (below body weight).");
@@ -219,13 +219,14 @@ public static class ProtectionEvaluator
             return Unusable(sling, horn.Id, horn.PositionMeters.Y, "Horn was trundled.");
         }
 
-        if (horn.CollarAngleDegrees < -8f)
+        float effectiveCollarDegrees = horn.CollarAngleDegrees - ((1.0f - horn.Surface.CleanlinessMultiplier) * 10f);
+        if (effectiveCollarDegrees < -8f)
         {
             return Unusable(sling, horn.Id, horn.PositionMeters.Y,
-                "Tapering horn lacks a neck constriction; runner slips straight off.");
+                "Tapering or slime-coated horn lacks a neck constriction; runner slips straight off.");
         }
 
-        float collarSecurity = Math.Clamp(0.45f + ((horn.CollarAngleDegrees + 8f) / 28f), 0.40f, 1.0f);
+        float collarSecurity = Math.Clamp(0.45f + ((effectiveCollarDegrees + 8f) / 28f), 0.40f, 1.0f);
         float rockCapKn = ComputeRockSubstrateCapKn(horn.StructuralIntegrity, geology, contactAreaScale: horn.NeckRadiusMillimeters / 22f);
 
         float finalHoldKn = MathF.Round(Math.Min(sling.RatedStrengthKilonewtons * collarSecurity, rockCapKn), 2);

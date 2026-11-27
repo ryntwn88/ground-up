@@ -75,19 +75,20 @@ public sealed class ForearmPumpModel
         {
             IDrillTool tool = drillTool ?? new HandDrillTool();
             float hardnessScale = geology is null ? 1.0f : (0.55f + (geology.DrillHardness * 0.65f));
-            return (tool.ForearmEffortPerSecond * 0.45f * hardnessScale) - 1.40f;
+            return MathF.Round((tool.ForearmEffortPerSecond * 0.45f * hardnessScale) - 1.40f, 2);
         }
 
-        // Free stance or climbing: wall angle + hold size + stance support govern grip load.
+        // Continuous slab -> vertical -> overhang load curve:
+        // Slabs (< 0 deg) shift weight onto feet; overhangs (> 0 deg) load forearms steeply.
         float angleLoad = cliffOverhangDegrees switch
         {
-            < -10f => 0.55f,
-            <= 0f => 1.00f + ((cliffOverhangDegrees + 10f) * 0.045f),
-            _ => 1.45f + (cliffOverhangDegrees * 0.085f)
+            <= -15f => 0.20f,
+            <= 0f => 0.20f + ((cliffOverhangDegrees + 15f) * (0.80f / 15f)),
+            _ => 1.00f + (cliffOverhangDegrees * 0.085f)
         };
 
         float holdDifficulty = 1.0f;
-        if (activeHandHold is not null)
+        if (activeHandHold is not null && !activeHandHold.IsTrundled)
         {
             float depthFactor = Math.Clamp(22f / activeHandHold.DepthMillimeters, 0.55f, 2.35f);
             float incutModifier = 1.0f - (activeHandHold.IncutDegrees / 65f);
@@ -98,7 +99,8 @@ public sealed class ForearmPumpModel
         float stanceRelief = 1.0f;
         if (activeStance is not null && !activeStance.IsTrundled)
         {
-            if (activeStance.AllowsNoHandsRest && actionState != ClimberActionState.DrillingBolt)
+            // Hands-free rest requires a large flat ledge AND a wall angle that doesn't push the climber's CoM off backward.
+            if (activeStance.AllowsNoHandsRest && cliffOverhangDegrees <= 8f && actionState != ClimberActionState.DrillingBolt)
             {
                 return -2.40f;
             }
@@ -108,7 +110,7 @@ public sealed class ForearmPumpModel
             stanceRelief = Math.Clamp(1.0f - (areaRelief * (1.0f - slopePenalty)), 0.28f, 1.0f);
         }
 
-        float baseClimbDrain = 1.65f * angleLoad * holdDifficulty * stanceRelief;
+        float baseClimbDrain = 1.05f * angleLoad * holdDifficulty * stanceRelief;
 
         return actionState switch
         {
@@ -116,8 +118,8 @@ public sealed class ForearmPumpModel
             // Locking off on one hand to inspect rock / place gear drains ~1.55x faster than two-handed climbing!
             ClimberActionState.StanceInspect => MathF.Round(baseClimbDrain * 1.55f, 2),
             ClimberActionState.DrillingBolt => MathF.Round(
-                (baseClimbDrain * 1.65f) + ComputeDrillArmLoad(drillTool, geology), 2),
-            _ => 0f
+                (baseClimbDrain * 1.50f) + ComputeDrillArmLoad(drillTool, geology), 2),
+            _ => throw new ArgumentOutOfRangeException(nameof(actionState), actionState, "Unsupported climber action state.")
         };
     }
 
@@ -158,18 +160,23 @@ public sealed class ForearmPumpModel
         IDrillTool? drillTool = null)
     {
         ArgumentNullException.ThrowIfNull(geology);
+        if (holeDepthMillimeters <= 0f)
+        {
+            return 0f;
+        }
+
         IDrillTool tool = drillTool ?? new HandDrillTool();
 
         // Soft sandstone (0.35 hardness) drills ~2.6x faster than crystalline granite (1.00 hardness).
         float rockSpeedMultiplier = 1.0f / Math.Max(0.28f, geology.DrillHardness);
-        float effectiveMmPerSec = tool.BasePenetrationMillimetersPerSecond * rockSpeedMultiplier;
+        float effectiveMmPerSec = Math.Max(0.05f, tool.BasePenetrationMillimetersPerSecond) * rockSpeedMultiplier;
         return MathF.Round(holeDepthMillimeters / effectiveMmPerSec, 1);
     }
 
     private static float ComputeDrillArmLoad(IDrillTool? drillTool, GeologyProfile? geology)
     {
         IDrillTool tool = drillTool ?? new HandDrillTool();
-        float hardnessMultiplier = geology is null ? 1.0f : (0.65f + (geology.DrillHardness * 0.55f));
+        float hardnessMultiplier = geology is null ? 1.0f : (0.12f + (geology.DrillHardness * 0.98f));
         return tool.ForearmEffortPerSecond * hardnessMultiplier;
     }
 }

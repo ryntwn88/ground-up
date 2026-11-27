@@ -17,7 +17,7 @@ public abstract record GearSpecBase(
     float MassGrams);
 
 /// <summary>
-/// Spring-loaded camming device (SLCD). Usable range lies inside [MinWidthMm, MaxWidthMm],
+/// Spring-loaded camming device (SLCD). Usable range lies inside [MinWidthMillimeters, MaxWidthMillimeters],
 /// with peak holding power in the 20%-65% retraction sweet spot.
 /// </summary>
 public sealed record CamSpec(
@@ -86,7 +86,7 @@ public sealed record BoltSpec(
 public static class StandardRack
 {
     public static readonly CamSpec Cam01 = new("#0.1", "Micro Cam #0.1 (Red)", 6.5f, 11.4f, 18f, 5.0f, 52f);
-    public static readonly CamSpec Cam02 = new("#0.2", "Micro Cam #0.2 (Yellow)", 7.8f, 12.7f, 20f, 6.0f, 56f);
+    public static readonly CamSpec Cam02 = new("#0.2", "Micro Cam #0.2 (Yellow)", 9.8f, 16.5f, 21f, 7.0f, 58f);
     public static readonly CamSpec Cam03 = new("#0.3", "Cam #0.3 (Blue)", 13.8f, 23.4f, 26f, 8.0f, 70f);
     public static readonly CamSpec Cam04 = new("#0.4", "Cam #0.4 (Gray)", 15.5f, 26.7f, 28f, 9.0f, 78f);
     public static readonly CamSpec Cam05 = new("#0.5", "Cam #0.5 (Purple)", 19.6f, 33.5f, 32f, 12.0f, 93f);

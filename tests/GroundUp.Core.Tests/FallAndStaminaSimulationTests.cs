@@ -158,7 +158,7 @@ public sealed class FallAndStaminaSimulationTests
 
         var sandstoneClimber = new ForearmPumpModel(initialPump: 10f);
         bool pumpedOutInSandstone = sandstoneClimber.AdvanceSeconds(
-            sandstoneHoleTime * 0.35f,
+            sandstoneHoleTime,
             ClimberActionState.DrillingBolt,
             cliffOverhangDegrees: -8f,
             activeHandHold: smallEdge,
@@ -169,5 +169,67 @@ public sealed class FallAndStaminaSimulationTests
 
         Assert.True(pumpedOutInGranite);
         Assert.False(pumpedOutInSandstone);
+    }
+
+    [Fact]
+    public void SimulateLeadFall_MarginalChainGroundFall_CapsTransmittedRopeForceAtPieceStrength()
+    {
+        PlacedProtection[] skyhooksOnly =
+        [
+            new("hook-low", StandardRack.TalonHook, "e1", HeightMeters: 6.5f, EffectiveHoldingForceKilonewtons: 1.9f, PlacementQuality.SketchyBodyWeightOnly),
+            new("hook-high", StandardRack.CliffhangerHook, "e2", HeightMeters: 8.5f, EffectiveHoldingForceKilonewtons: 2.4f, PlacementQuality.SketchyBodyWeightOnly)
+        ];
+
+        FallSimulationResult result = RopeAndFallSimulator.SimulateLeadFall(
+            climberHeightMeters: 9.5f,
+            activeProtectionChain: skyhooksOnly,
+            climberMassKg: 80f);
+
+        Assert.Equal(FallOutcome.GroundFall, result.Outcome);
+        Assert.Equal(2, result.BlownPieces.Count);
+        Assert.Equal(2.4f, result.PeakTopPieceLoadKilonewtons, precision: 2);
+        Assert.Equal(1.5f, result.PeakClimberImpactKilonewtons, precision: 2);
+    }
+
+    [Fact]
+    public void SimulateLeadFall_RopeStretchGroundFall_ClearsCatchingPlacementId()
+    {
+        PlacedProtection[] lowCam =
+        [
+            new("cam-stretch-deck", StandardRack.Cam2, "crack-low", HeightMeters: 2.2f, EffectiveHoldingForceKilonewtons: 14.0f, PlacementQuality.Bomber)
+        ];
+
+        // Rope comes taut 0.15m above the ground, then stretches past 0m into a ground fall.
+        FallSimulationResult result = RopeAndFallSimulator.SimulateLeadFall(
+            climberHeightMeters: 4.0f,
+            activeProtectionChain: lowCam,
+            climberMassKg: 80f,
+            slackMeters: 0.25f);
+
+        Assert.Equal(FallOutcome.GroundFall, result.Outcome);
+        Assert.Equal(0f, result.FinalRestingHeightMeters);
+        Assert.Null(result.CatchingPlacementId);
+    }
+
+    [Fact]
+    public void ForearmPump_NoHandsLedgeRestWorksOnVerticalWall_ButNotOnSteepOverhang()
+    {
+        var bigLedge = new StanceFeature("ledge", "Flat Ledge", new Vector3(0, 3f, 0), footAreaSqCentimeters: 450f, slopeDegrees: 5f);
+        var hold = new EdgeFeature("edge", "Moderate Edge", new Vector3(0, 4.5f, 0), 45f, depthMillimeters: 16f, incutDegrees: 4f);
+
+        float verticalRate = ForearmPumpModel.ComputePumpRatePerSecond(
+            ClimberActionState.FreeClimbing,
+            cliffOverhangDegrees: 4f,
+            activeHandHold: hold,
+            activeStance: bigLedge);
+
+        float steepOverhangRate = ForearmPumpModel.ComputePumpRatePerSecond(
+            ClimberActionState.FreeClimbing,
+            cliffOverhangDegrees: 30f,
+            activeHandHold: hold,
+            activeStance: bigLedge);
+
+        Assert.True(verticalRate < 0f);
+        Assert.True(steepOverhangRate > 0f);
     }
 }
