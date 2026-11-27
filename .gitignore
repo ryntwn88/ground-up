@@ -1,0 +1,30 @@
+# .NET / C# build outputs
+bin/
+obj/
+out/
+TestResults/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+# Godot 4+ cache & imports
+.godot/
+godot/.godot/
+.import/
+export_presets.cfg
+*.translation
+
+# Mono / Rider / VS / VS Code
+.vs/
+.idea/
+.vscode/*
+!.vscode/settings.json
+!.vscode/launch.json
+!.vscode/tasks.json
+*.csproj.old
+
+# OS & Word temp lock files
+~$*.docx
+Thumbs.db
+.DS_Store
