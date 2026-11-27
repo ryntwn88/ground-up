@@ -115,6 +115,12 @@ public abstract class RockFeatureBase
         IsTrundled = true;
         return true;
     }
+
+    /// <summary>
+    /// Returns the attachment coordinate in cliff-face local meters (before cliff overhang rotation).
+    /// Point features ignore <paramref name="normalizedPosition"/>; linear cracks interpolate along their profile.
+    /// </summary>
+    public virtual Vector3 GetLocalAttachmentPointMeters(float normalizedPosition = 0.5f) => PositionMeters;
 }
 
 public readonly record struct CrackPoint(
@@ -174,6 +180,12 @@ public sealed class CrackFeature : RockFeatureBase
 
     public CrackSample SampleAtWorldHeight(float worldHeightMeters) =>
         SampleAtNormalized(GetNormalizedPositionForWorldHeight(worldHeightMeters));
+
+    public override Vector3 GetLocalAttachmentPointMeters(float normalizedPosition = 0.5f)
+    {
+        CrackSample sample = SampleAtNormalized(normalizedPosition);
+        return new Vector3(PositionMeters.X, sample.WorldHeightMeters, PositionMeters.Z);
+    }
 
     public CrackSample SampleAtNormalized(float t)
     {
@@ -338,6 +350,40 @@ public sealed class CliffFace
     }
 
     public IReadOnlyList<RockFeatureBase> Features => _features;
+
+    /// <summary>
+    /// Outward surface normal pointing from the rock face toward the climber (+Z when vertical).
+    /// </summary>
+    public Vector3 WallOutwardNormal
+    {
+        get
+        {
+            float radians = OverhangDegrees * (MathF.PI / 180f);
+            return new Vector3(0f, -MathF.Sin(radians), MathF.Cos(radians));
+        }
+    }
+
+    /// <summary>
+    /// Transforms a cliff-local coordinate (X = lateral, Y = distance up face, Z = outward depth offset)
+    /// into 3D world space accounting for <see cref="OverhangDegrees"/>.
+    /// </summary>
+    public Vector3 WallToWorldPositionMeters(Vector3 wallLocalPositionMeters)
+    {
+        float radians = OverhangDegrees * (MathF.PI / 180f);
+        float cos = MathF.Cos(radians);
+        float sin = MathF.Sin(radians);
+
+        return new Vector3(
+            wallLocalPositionMeters.X,
+            (wallLocalPositionMeters.Y * cos) - (wallLocalPositionMeters.Z * sin),
+            (wallLocalPositionMeters.Y * sin) + (wallLocalPositionMeters.Z * cos));
+    }
+
+    public Vector3 GetFeatureWorldPositionMeters(RockFeatureBase feature, float normalizedPosition = 0.5f)
+    {
+        ArgumentNullException.ThrowIfNull(feature);
+        return WallToWorldPositionMeters(feature.GetLocalAttachmentPointMeters(normalizedPosition));
+    }
 
     public void AddFeature(RockFeatureBase feature)
     {

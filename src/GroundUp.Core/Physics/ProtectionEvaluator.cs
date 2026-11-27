@@ -49,6 +49,30 @@ public sealed record PlacedProtection(
 /// </summary>
 public static class ProtectionEvaluator
 {
+    public static PlacementEvaluation EvaluatePlacement(
+        GearSpecBase gear,
+        RockFeatureBase feature,
+        float normalizedCrackPosition,
+        GeologyProfile geology)
+    {
+        ArgumentNullException.ThrowIfNull(gear);
+        ArgumentNullException.ThrowIfNull(feature);
+        ArgumentNullException.ThrowIfNull(geology);
+
+        return (gear, feature) switch
+        {
+            (CamSpec cam, CrackFeature crack) => EvaluateCam(cam, crack, normalizedCrackPosition, geology),
+            (PitonSpec piton, CrackFeature seam) => EvaluatePiton(piton, seam, normalizedCrackPosition, geology),
+            (SkyhookSpec hook, EdgeFeature edge) => EvaluateSkyhook(hook, edge, geology),
+            (SlingSpec sling, HornFeature horn) => EvaluateSling(sling, horn, geology),
+            _ => Unusable(
+                gear,
+                feature.Id,
+                feature.GetLocalAttachmentPointMeters(normalizedCrackPosition).Y,
+                $"{gear.DisplayName} ({gear.Kind}) cannot be placed on '{feature.Name}'.")
+        };
+    }
+
     public static PlacementEvaluation EvaluateCam(
         CamSpec cam,
         CrackFeature crack,
@@ -190,8 +214,8 @@ public static class ProtectionEvaluator
         }
 
         float incutFactor = Math.Clamp(0.55f + ((effectiveIncut - hook.MaxLipSlopeToleranceDegrees) / 28f), 0.45f, 1.05f);
-        // Point load of a steel hook crushes friable sandstone crystals under body weight!
-        float crystalStrengthFactor = (1.0f - (geology.Friability * 0.85f)) * edge.StructuralIntegrity;
+        // Point load of a steel hook crushes friable sandstone crystals under body weight and slips on mossy slime!
+        float crystalStrengthFactor = (1.0f - (geology.Friability * 0.85f)) * edge.StructuralIntegrity * edge.Surface.CleanlinessMultiplier;
         float finalHoldKn = MathF.Round(hook.RatedStrengthKilonewtons * incutFactor * crystalStrengthFactor, 2);
 
         if (finalHoldKn < 1.05f)

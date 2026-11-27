@@ -65,10 +65,11 @@ Instead of relying on external scan datasets, *Ground Up!* generates its own gro
 - [x] **Stamina / Pump Model:** Continuous forearm pump accumulation from wall overhang + grip difficulty + one-handed stance locks vs. recovery on ledges or while hanging on gear.
 - [x] **Exit Gate:** Automated CLI xUnit suite simulating 33 climbing, aid-weighting, whipper, and stamina scenarios.
 
-### Phase 1: "The 10-Meter Graybox Wall" — First Playable (Weeks 3-8)
-- Static 3D graybox cliff in Godot 4 with semantic test features (splitter crack, flaring seam, hookable edges, horn, stances, moss, hollow choss flake).
-- Hybrid third-person climber controller (4-limb IK snapping + center-of-mass balance + pump HUD).
-- Tactile close-up camera for sounding/trundling choss, brushing moss, and slotting/weighting cams, hooks, pitons, and slings, plus dynamic whipper arrest.
+### Phase 1: "The 10-Meter Graybox Wall" — First Playable (Weeks 3-8 — Completed)
+- [x] Static 3D graybox cliff in Godot 4 with semantic test features (splitter crack, flaring seam, hookable edges, horn, stances, moss, hollow choss flake).
+- [x] Hybrid third-person climber controller (4-limb IK snapping + center-of-mass balance + pump HUD).
+- [x] Tactile close-up camera for sounding/trundling choss, brushing moss, and slotting/weighting cams, hooks, pitons, and slings, plus dynamic whipper arrest.
+- [x] **Exit Gate:** 40 deterministic CLI xUnit scenarios verifying full ground-to-summit ascent, choss snap whippers, mossy skyhook blowouts, CoM balance pump, and gear weighting.
 
 ### Phase 2: Ground-Up Bolting, FFA Mode & Route Star-Rating (Weeks 9-15)
 - Hand-drilling mechanic scaled by rock hardness, dust blow-out, stance vs. gear hang trade-offs, plus modular power-drill interface.

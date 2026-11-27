@@ -1,40 +1,500 @@
-using System.Text;
 using Godot;
+using GroundUp.Core.Climbing;
 using GroundUp.Core.Gear;
 using GroundUp.Core.Geology;
 using GroundUp.Core.Physics;
 using GroundUp.Core.Samples;
-using GroundUp.Core.Stamina;
 
 namespace GroundUp.GodotClient;
 
 /// <summary>
-/// Phase 0/1 bridge scene: renders the semantic 10m x 6m granite test cliff as color-coded 3D graybox geometry
-/// and verifies live GroundUp.Core physics evaluations on startup.
+/// Phase 1 playable scene controller ("The 10-Meter Graybox Wall"):
+/// connects player input, 3D feature raycasting, IK climber visuals, rope physics, close-up inspection camera,
+/// procedural rock-sounding audio, and dynamic whippers to <see cref="ClimbingSession"/>.
 /// </summary>
 public partial class GrayboxSandboxController : Node3D
 {
     private CliffFace _cliff = null!;
-    private Camera3D _camera = null!;
-    private float _orbitAngleRadians;
+    private ClimbingSession _session = null!;
+
+    private CliffGrayboxBuilder _cliffBuilder = null!;
+    private ClimberVisualRig _climberRig = null!;
+    private DynamicRopeRenderer _ropeRenderer = null!;
+    private HybridClimbingCamera _cameraRig = null!;
+    private WhipperAnimator _whipperAnimator = null!;
+    private RockSoundSynth _soundSynth = null!;
+    private ClimbingHudController _hud = null!;
+
+    private LimbSlot? _manualLimbOverride;
+    private GearKind _selectedGearCategory = GearKind.Cam;
+    private int _selectedGearIndexInCategory = 5; // Default to #0.75 Green Cam
+    private bool _isRightMouseOrbiting;
+
+    private string? _hoveredFeatureId;
+    private float _hoveredNormalizedPos = 0.5f;
+    private Vector3? _hoveredWorldPoint;
+    private string? _lockedInspectFeatureId;
 
     public override void _Ready()
     {
-        _cliff = TestCliffFactory.CreateTenMeterGraniteWall();
-
+        InitializeSimulation();
         SetupEnvironmentAndLighting();
-        BuildGrayboxCliffGeometry();
-        SetupCamera();
-        BuildDiagnosticsOverlay();
+
+        _cliffBuilder = new CliffGrayboxBuilder { Name = "CliffGrayboxBuilder" };
+        AddChild(_cliffBuilder);
+        _cliffBuilder.BuildCliff(_cliff);
+
+        _climberRig = new ClimberVisualRig { Name = "ClimberVisualRig" };
+        AddChild(_climberRig);
+
+        _ropeRenderer = new DynamicRopeRenderer { Name = "DynamicRopeRenderer" };
+        AddChild(_ropeRenderer);
+
+        _cameraRig = new HybridClimbingCamera { Name = "HybridClimbingCamera" };
+        AddChild(_cameraRig);
+
+        _whipperAnimator = new WhipperAnimator { Name = "WhipperAnimator" };
+        AddChild(_whipperAnimator);
+
+        _soundSynth = new RockSoundSynth { Name = "RockSoundSynth" };
+        AddChild(_soundSynth);
+
+        _hud = new ClimbingHudController { Name = "ClimbingHUD" };
+        _hud.ToggleStanceRequested += HandleToggleStance;
+        _hud.WeightGearRequested += HandleWeightGear;
+        _hud.ResetClimbRequested += HandleFullReset;
+        _hud.HotkeySlotPressed += HandleToolSlotSelected;
+        AddChild(_hud);
+    }
+
+    public override void _UnhandledInput(InputEvent @event)
+    {
+        if (@event is InputEventMouseButton mb)
+        {
+            if (mb.ButtonIndex == MouseButton.Right)
+            {
+                _isRightMouseOrbiting = mb.Pressed;
+                return;
+            }
+
+            if (mb.Pressed && mb.ButtonIndex == MouseButton.WheelUp)
+            {
+                if (_session.SelectedTool == ActiveToolKind.PlaceGear)
+                {
+                    CycleGearInCategory(+1);
+                }
+                else
+                {
+                    _cameraRig.AdjustZoom(+1f);
+                }
+
+                return;
+            }
+
+            if (mb.Pressed && mb.ButtonIndex == MouseButton.WheelDown)
+            {
+                if (_session.SelectedTool == ActiveToolKind.PlaceGear)
+                {
+                    CycleGearInCategory(-1);
+                }
+                else
+                {
+                    _cameraRig.AdjustZoom(-1f);
+                }
+
+                return;
+            }
+
+            if (mb.Pressed && mb.ButtonIndex == MouseButton.Left)
+            {
+                HandlePrimaryClick();
+                return;
+            }
+        }
+
+        if (@event is InputEventMouseMotion motion && _isRightMouseOrbiting)
+        {
+            _cameraRig.HandleOrbitDrag(motion.Relative);
+            return;
+        }
+
+        if (@event is InputEventKey key && key.Pressed && !key.Echo)
+        {
+            HandleKeyPress(key.Keycode);
+        }
     }
 
     public override void _Process(double delta)
     {
-        // Gentle camera sway around the 10m test wall; Phase 1 replaces this with the hybrid climber/close-up camera.
-        _orbitAngleRadians += (float)delta * 0.18f;
-        float swayX = Mathf.Sin(_orbitAngleRadians) * 2.2f;
-        _camera.Position = new Vector3(swayX, 5.2f, 9.5f);
-        _camera.LookAt(new Vector3(0f, 5.0f, 0f), Vector3.Up);
+        float dt = (float)delta;
+
+        // Vertical scouting look-ahead with W / S keys.
+        float verticalInput = 0f;
+        if (Input.IsPhysicalKeyPressed(Key.W))
+        {
+            verticalInput += 3.2f * dt;
+        }
+
+        if (Input.IsPhysicalKeyPressed(Key.S))
+        {
+            verticalInput -= 3.2f * dt;
+        }
+
+        if (Mathf.Abs(verticalInput) > 0.0001f)
+        {
+            _cameraRig.AdjustVerticalLookOffset(verticalInput);
+        }
+
+        UpdateMouseHoverRaycast();
+
+        SessionMode prevMode = _session.Mode;
+        _session.AdvanceTime(dt);
+        if (prevMode != SessionMode.WhipperFall && _session.Mode == SessionMode.WhipperFall)
+        {
+            _whipperAnimator.BeginWhipper(_session, _climberRig.FocusPelvisWorldPosition, _soundSynth);
+        }
+
+        if (_session.Mode == SessionMode.WhipperFall)
+        {
+            if (!_whipperAnimator.IsPlayingWhipper)
+            {
+                _whipperAnimator.BeginWhipper(_session, _climberRig.FocusPelvisWorldPosition, _soundSynth);
+            }
+
+            _whipperAnimator.TickWhipper(_session, dt);
+            _climberRig.SetOverridePelvisPosition(_cliff, _session, _whipperAnimator.CurrentFallingPelvisWorld, dt);
+        }
+        else
+        {
+            _climberRig.SyncFromSession(_session, _hoveredWorldPoint, dt);
+        }
+
+        bool ropeTaut = _session.Mode == SessionMode.HangingOnGear || _whipperAnimator.IsRopeCurrentlyTaut;
+        _ropeRenderer.SyncRopeAndGear(_session, _climberRig.HarnessWorldPosition, ropeTaut);
+
+        Vector3? inspectFocus = ResolveCloseUpCameraFocus();
+        _cameraRig.UpdateCamera(_session, _climberRig.FocusPelvisWorldPosition, inspectFocus, dt);
+
+        _cliffBuilder.TickDebris(dt);
+        _cliffBuilder.RefreshVisuals(_cliff, _session, _hoveredFeatureId, _hoveredNormalizedPos);
+
+        RockFeatureBase? hoveredFeature = _hoveredFeatureId is not null ? _cliff.FindFeature(_hoveredFeatureId) : null;
+        PlacementEvaluation? hoveredEval = (_session.SelectedTool == ActiveToolKind.PlaceGear && _session.SelectedGear is not null && hoveredFeature is not null)
+            ? _session.PreviewPlacement(_session.SelectedGear, hoveredFeature.Id, _hoveredNormalizedPos)
+            : null;
+
+        _hud.UpdateHud(_session, _manualLimbOverride, hoveredFeature, _hoveredNormalizedPos, hoveredEval);
+    }
+
+    private void InitializeSimulation()
+    {
+        _cliff = TestCliffFactory.CreateTenMeterGraniteWall();
+        _session = new ClimbingSession(_cliff);
+        _manualLimbOverride = null;
+        _lockedInspectFeatureId = null;
+    }
+
+    private void HandlePrimaryClick()
+    {
+        if (_session.Mode is SessionMode.WhipperFall or SessionMode.ToppedOut)
+        {
+            return;
+        }
+
+        if (_hoveredFeatureId is null)
+        {
+            return;
+        }
+
+        if (_session.Mode == SessionMode.Grounded)
+        {
+            _session.TryStepOntoWallFromGround();
+            _cameraRig.ResetScoutOffset();
+            return;
+        }
+
+        if (_session.Mode is SessionMode.FreeClimbing or SessionMode.HangingOnGear &&
+            _session.SelectedTool == ActiveToolKind.None)
+        {
+            RockFeatureBase? clickedFeature = _cliff.FindFeature(_hoveredFeatureId);
+            bool wasChoss = clickedFeature is not null && clickedFeature.IsHollowChoss && !clickedFeature.IsTrundled;
+            Vector3? chossWorld = clickedFeature is not null ? _cliff.GetFeatureWorldPositionMeters(clickedFeature, _hoveredNormalizedPos).ToGodot() : null;
+
+            _session.TryMoveLimbToFeature(_hoveredFeatureId, _hoveredNormalizedPos, _manualLimbOverride);
+            _cameraRig.ResetScoutOffset();
+
+            if (wasChoss && clickedFeature!.IsTrundled && chossWorld.HasValue)
+            {
+                _cliffBuilder.SpawnTrundleDebris(chossWorld.Value);
+                _soundSynth.PlayTrundleCrash();
+            }
+
+            if (_session.Mode == SessionMode.WhipperFall)
+            {
+                _whipperAnimator.BeginWhipper(_session, _climberRig.FocusPelvisWorldPosition, _soundSynth);
+            }
+
+            return;
+        }
+
+        // In StanceInspect / CleaningAndGear (or HangingOnGear with a tool active):
+        _lockedInspectFeatureId = _hoveredFeatureId;
+        switch (_session.SelectedTool)
+        {
+            case ActiveToolKind.HammerSound:
+                if (_session.TrySoundFeature(_hoveredFeatureId, out RockSoundingResult sound))
+                {
+                    _soundSynth.PlayRockSounding(sound);
+                }
+                break;
+
+            case ActiveToolKind.WireBrush:
+                if (_session.TryBrushFeature(_hoveredFeatureId, brushEffort: 0.70f))
+                {
+                    _soundSynth.PlayBrushScrape();
+                }
+                break;
+
+            case ActiveToolKind.Prybar:
+                RockFeatureBase? target = _cliff.FindFeature(_hoveredFeatureId);
+                Vector3 debrisPos = target is not null
+                    ? _cliff.GetFeatureWorldPositionMeters(target, 0.5f).ToGodot()
+                    : _climberRig.FocusPelvisWorldPosition;
+                if (_session.TryTrundleFeature(_hoveredFeatureId))
+                {
+                    _cliffBuilder.SpawnTrundleDebris(debrisPos);
+                    _soundSynth.PlayTrundleCrash();
+                }
+                break;
+
+            case ActiveToolKind.PlaceGear when _session.SelectedGear is not null:
+                if (_session.TryPlaceProtection(_session.SelectedGear, _hoveredFeatureId, _hoveredNormalizedPos, out _, out _))
+                {
+                    _soundSynth.PlayGearPlaced(_session.SelectedGear.Kind);
+                }
+                break;
+
+            default:
+                if (_session.TrySoundFeature(_hoveredFeatureId, out RockSoundingResult knuckleTap))
+                {
+                    _soundSynth.PlayRockSounding(knuckleTap);
+                }
+                break;
+        }
+    }
+
+    private void HandleKeyPress(Key keycode)
+    {
+        switch (keycode)
+        {
+            case Key.F:
+                HandleToggleStance();
+                break;
+            case Key.G:
+                HandleWeightGear();
+                break;
+            case Key.R:
+                HandleFullReset();
+                break;
+            case Key.F3:
+                _hud.ShowTelemetry = !_hud.ShowTelemetry;
+                break;
+            case Key.H:
+                _hud.ShowControlsHelp = !_hud.ShowControlsHelp;
+                break;
+            case Key.Escape:
+                _manualLimbOverride = null;
+                break;
+            case Key.Q:
+                ToggleLimbOverride(LimbSlot.LeftHand);
+                break;
+            case Key.E:
+                ToggleLimbOverride(LimbSlot.RightHand);
+                break;
+            case Key.Z:
+                ToggleLimbOverride(LimbSlot.LeftFoot);
+                break;
+            case Key.C:
+                ToggleLimbOverride(LimbSlot.RightFoot);
+                break;
+            case Key.Key1:
+                HandleToolSlotSelected(1);
+                break;
+            case Key.Key2:
+                HandleToolSlotSelected(2);
+                break;
+            case Key.Key3:
+                HandleToolSlotSelected(3);
+                break;
+            case Key.Key4:
+                HandleToolSlotSelected(4);
+                break;
+            case Key.Key5:
+                HandleToolSlotSelected(5);
+                break;
+            case Key.Key6:
+                HandleToolSlotSelected(6);
+                break;
+            case Key.Key7:
+                HandleToolSlotSelected(7);
+                break;
+            case Key.Bracketleft:
+                CycleGearInCategory(-1);
+                break;
+            case Key.Bracketright:
+                CycleGearInCategory(+1);
+                break;
+        }
+    }
+
+    private void ToggleLimbOverride(LimbSlot slot)
+    {
+        _manualLimbOverride = _manualLimbOverride == slot ? null : slot;
+    }
+
+    private void HandleToggleStance()
+    {
+        if (_session.Mode == SessionMode.Grounded)
+        {
+            _session.TryStepOntoWallFromGround();
+            return;
+        }
+
+        if (_session.Mode == SessionMode.FreeClimbing)
+        {
+            _lockedInspectFeatureId = _hoveredFeatureId;
+            _session.TryLockThreePointStance();
+        }
+        else if (_session.Mode is SessionMode.StanceInspect or SessionMode.CleaningAndGear or SessionMode.HangingOnGear)
+        {
+            _lockedInspectFeatureId = null;
+            _session.ReturnToFreeClimbing();
+        }
+    }
+
+    private void HandleWeightGear()
+    {
+        bool held = _session.TryWeightPlacedGear();
+        if (!held && _session.Mode == SessionMode.WhipperFall)
+        {
+            _soundSynth.PlayGearBlowout();
+            _whipperAnimator.BeginWhipper(_session, _climberRig.FocusPelvisWorldPosition, _soundSynth);
+        }
+    }
+
+    private void HandleFullReset()
+    {
+        InitializeSimulation();
+        _cliffBuilder.BuildCliff(_cliff);
+        _cameraRig.ResetScoutOffset();
+    }
+
+    private void HandleToolSlotSelected(int slot)
+    {
+        if (_session.Mode == SessionMode.FreeClimbing)
+        {
+            _session.TryLockThreePointStance();
+        }
+
+        switch (slot)
+        {
+            case 1:
+                _session.SelectWorkTool(ActiveToolKind.HammerSound);
+                break;
+            case 2:
+                _session.SelectWorkTool(ActiveToolKind.WireBrush);
+                break;
+            case 3:
+                _session.SelectWorkTool(ActiveToolKind.Prybar);
+                break;
+            case 4:
+                SelectGearCategory(GearKind.Cam);
+                break;
+            case 5:
+                SelectGearCategory(GearKind.Piton);
+                break;
+            case 6:
+                SelectGearCategory(GearKind.Skyhook);
+                break;
+            case 7:
+                SelectGearCategory(GearKind.Sling);
+                break;
+        }
+    }
+
+    private void SelectGearCategory(GearKind kind)
+    {
+        _selectedGearCategory = kind;
+        IReadOnlyList<RackEntry> entries = _session.Rack.GetEntriesByKind(kind);
+        if (entries.Count == 0)
+        {
+            return;
+        }
+
+        _selectedGearIndexInCategory = Mathf.Clamp(_selectedGearIndexInCategory, 0, entries.Count - 1);
+        _session.SelectWorkTool(ActiveToolKind.PlaceGear, entries[_selectedGearIndexInCategory].Gear);
+    }
+
+    private void CycleGearInCategory(int delta)
+    {
+        IReadOnlyList<RackEntry> entries = _session.Rack.GetEntriesByKind(_selectedGearCategory);
+        if (entries.Count == 0)
+        {
+            return;
+        }
+
+        _selectedGearIndexInCategory = (_selectedGearIndexInCategory + delta + entries.Count) % entries.Count;
+        _session.SelectWorkTool(ActiveToolKind.PlaceGear, entries[_selectedGearIndexInCategory].Gear);
+    }
+
+    private void UpdateMouseHoverRaycast()
+    {
+        if (DisplayServer.GetName() == "headless")
+        {
+            _hoveredFeatureId = null;
+            _hoveredWorldPoint = null;
+            return;
+        }
+
+        Viewport viewport = GetViewport();
+        Vector2 mousePos = viewport.GetMousePosition();
+        Vector3 from = _cameraRig.Camera.ProjectRayOrigin(mousePos);
+        Vector3 to = from + (_cameraRig.Camera.ProjectRayNormal(mousePos) * 28f);
+
+        var query = PhysicsRayQueryParameters3D.Create(from, to, CliffGrayboxBuilder.FeatureCollisionLayer);
+        Godot.Collections.Dictionary hit = GetWorld3D().DirectSpaceState.IntersectRay(query);
+
+        if (hit.Count > 0 && hit["collider"].AsGodotObject() is Node collider && collider.HasMeta("feature_id"))
+        {
+            string id = collider.GetMeta("feature_id").AsString();
+            Vector3 worldHit = hit["position"].AsVector3();
+            RockFeatureBase? feat = _cliff.FindFeature(id);
+            if (feat is not null)
+            {
+                _hoveredFeatureId = id;
+                _hoveredNormalizedPos = _cliffBuilder.GetNormalizedPositionFromWorldHit(feat, worldHit);
+                _hoveredWorldPoint = _cliff.GetFeatureWorldPositionMeters(feat, _hoveredNormalizedPos).ToGodot();
+                return;
+            }
+        }
+
+        _hoveredFeatureId = null;
+        _hoveredWorldPoint = null;
+    }
+
+    private Vector3? ResolveCloseUpCameraFocus()
+    {
+        if (_hoveredWorldPoint.HasValue)
+        {
+            return _hoveredWorldPoint.Value;
+        }
+
+        if (_lockedInspectFeatureId is not null && _cliff.FindFeature(_lockedInspectFeatureId) is RockFeatureBase feat)
+        {
+            return _cliff.GetFeatureWorldPositionMeters(feat, 0.5f).ToGodot();
+        }
+
+        return null;
     }
 
     private void SetupEnvironmentAndLighting()
@@ -51,135 +511,11 @@ public partial class GrayboxSandboxController : Node3D
         var env = new Godot.Environment
         {
             BackgroundMode = Godot.Environment.BGMode.Color,
-            BackgroundColor = new Color(0.11f, 0.14f, 0.18f),
+            BackgroundColor = new Color(0.11f, 0.15f, 0.20f),
             AmbientLightSource = Godot.Environment.AmbientSource.Color,
-            AmbientLightColor = new Color(0.38f, 0.42f, 0.48f),
-            AmbientLightEnergy = 0.65f
+            AmbientLightColor = new Color(0.40f, 0.44f, 0.50f),
+            AmbientLightEnergy = 0.68f
         };
         AddChild(new WorldEnvironment { Environment = env });
-    }
-
-    private void BuildGrayboxCliffGeometry()
-    {
-        // Ground pad
-        AddBoxMesh("GroundBase", new Vector3(12f, 0.4f, 8f), new Vector3(0f, -0.2f, 2.5f), new Color(0.24f, 0.22f, 0.19f));
-
-        // Main 10m x 6m granite slab/overhang wall
-        var wallRoot = new Node3D
-        {
-            Name = "CliffWallRoot",
-            RotationDegrees = new Vector3(_cliff.OverhangDegrees, 0f, 0f)
-        };
-        AddChild(wallRoot);
-
-        AddBoxMeshTo(
-            wallRoot,
-            "GraniteWallBody",
-            new Vector3(_cliff.WidthMeters, _cliff.HeightMeters, 0.8f),
-            new Vector3(0f, _cliff.HeightMeters * 0.5f, -0.4f),
-            new Color(0.46f, 0.47f, 0.50f));
-
-        // Semantic feature debug markers
-        foreach (RockFeatureBase feature in _cliff.Features)
-        {
-            Vector3 pos = new(feature.PositionMeters.X, feature.PositionMeters.Y, feature.PositionMeters.Z + 0.06f);
-            switch (feature)
-            {
-                case CrackFeature crack:
-                    float length = Mathf.Max(0.4f, crack.TotalLengthMeters);
-                    float centerY = (crack.MinWorldHeightMeters + crack.MaxWorldHeightMeters) * 0.5f;
-                    Color crackColor = crack.SampleAtNormalized(0f).WidthMillimeters < 10f
-                        ? new Color(0.95f, 0.62f, 0.18f) // Orange = thin piton seam
-                        : new Color(0.18f, 0.72f, 0.95f); // Cyan = splitter crack
-                    AddBoxMeshTo(wallRoot, crack.Id, new Vector3(0.08f, length, 0.12f), new Vector3(pos.X, centerY, pos.Z), crackColor);
-                    break;
-
-                case EdgeFeature edge:
-                    Color edgeColor = edge.IsHollowChoss
-                        ? new Color(0.90f, 0.22f, 0.22f) // Red = hollow choss block!
-                        : (!edge.Surface.IsClean ? new Color(0.28f, 0.68f, 0.26f) : new Color(0.92f, 0.88f, 0.30f));
-                    AddBoxMeshTo(wallRoot, edge.Id, new Vector3(edge.WidthMillimeters / 220f + 0.18f, 0.12f, 0.14f), pos, edgeColor);
-                    break;
-
-                case HornFeature horn:
-                    AddBoxMeshTo(wallRoot, horn.Id, new Vector3(0.24f, 0.24f, 0.28f), pos, new Color(0.75f, 0.45f, 0.95f));
-                    break;
-
-                case StanceFeature stance:
-                    float stanceWidth = Mathf.Clamp(stance.FootAreaSqCentimeters / 450f, 0.3f, 1.1f);
-                    AddBoxMeshTo(wallRoot, stance.Id, new Vector3(stanceWidth, 0.14f, 0.32f), pos, new Color(0.32f, 0.85f, 0.55f));
-                    break;
-            }
-        }
-    }
-
-    private void SetupCamera()
-    {
-        _camera = new Camera3D
-        {
-            Name = "PreviewCamera",
-            Fov = 55f
-        };
-        AddChild(_camera);
-    }
-
-    private void BuildDiagnosticsOverlay()
-    {
-        var crack = _cliff.GetFeature<CrackFeature>("crack-main-splitter");
-        var hookEdge = _cliff.GetFeature<EdgeFeature>("edge-crisp-hook");
-        var chossFlake = _cliff.GetFeature<EdgeFeature>("flake-hollow-choss");
-
-        PlacementEvaluation camEval = ProtectionEvaluator.EvaluateCam(StandardRack.Cam075, crack, 0.5f, _cliff.Geology);
-        PlacementEvaluation hookEval = ProtectionEvaluator.EvaluateSkyhook(StandardRack.CliffhangerHook, hookEdge, _cliff.Geology);
-        RockSoundingResult chossSound = chossFlake.SoundRock();
-
-        FallSimulationResult testWhipper = RopeAndFallSimulator.SimulateLeadFall(
-            climberHeightMeters: 8.2f,
-            activeProtectionChain:
-            [
-                new PlacedProtection("cam-075", StandardRack.Cam075, crack.Id, camEval.PlacementHeightMeters, camEval.EffectiveHoldingForceKilonewtons, camEval.Quality),
-                new PlacedProtection("skyhook-top", StandardRack.CliffhangerHook, hookEdge.Id, hookEval.PlacementHeightMeters, hookEval.EffectiveHoldingForceKilonewtons, hookEval.Quality)
-            ]);
-
-        float graniteDrillSec = ForearmPumpModel.EstimateBoltDrillTimeSeconds(89f, _cliff.Geology, new HandDrillTool());
-
-        var sb = new StringBuilder();
-        sb.AppendLine($"GROUND UP! — Phase 0/1 Graybox Simulation Bridge");
-        sb.AppendLine($"Cliff: {_cliff.Name} ({_cliff.WidthMeters:F0}m x {_cliff.HeightMeters:F0}m, {_cliff.OverhangDegrees:F0}° overhang, {_cliff.Geology.DisplayName})");
-        sb.AppendLine();
-        sb.AppendLine($"[Live GroundUp.Core Telemetry]");
-        sb.AppendLine($"• {StandardRack.Cam075.DisplayName} @ {crack.Name}: {camEval.Quality} ({camEval.EffectiveHoldingForceKilonewtons:F1} kN)");
-        sb.AppendLine($"• {StandardRack.CliffhangerHook.DisplayName} @ {hookEdge.Name}: {hookEval.Quality} ({hookEval.EffectiveHoldingForceKilonewtons:F1} kN, holds body weight: {hookEval.HoldsBodyWeight()})");
-        sb.AppendLine($"• Sounding '{chossFlake.Name}': {chossSound.Resonance} ({chossSound.AcousticPitchHz:F0} Hz, advise trundle: {chossSound.AdvisesTrundle})");
-        sb.AppendLine($"• 8.2m Whipper above Skyhook + #0.75 Cam: {testWhipper.Outcome} (blown: {testWhipper.BlownPieces.Count}, caught by: {testWhipper.CatchingPlacementId} at {testWhipper.FinalRestingHeightMeters:F1}m)");
-        sb.AppendLine($"• Hand-Drill 3/8\" x 3.5\" Wedge Bolt Time in Granite: ~{graniteDrillSec:F0}s");
-
-        var canvas = new CanvasLayer { Name = "DiagnosticsHUD" };
-        var panel = new PanelContainer
-        {
-            Position = new Vector2(24f, 24f)
-        };
-        var label = new Label
-        {
-            Text = sb.ToString()
-        };
-        panel.AddChild(label);
-        canvas.AddChild(panel);
-        AddChild(canvas);
-    }
-
-    private void AddBoxMesh(string name, Vector3 size, Vector3 position, Color color) =>
-        AddBoxMeshTo(this, name, size, position, color);
-
-    private static void AddBoxMeshTo(Node3D parent, string name, Vector3 size, Vector3 position, Color color)
-    {
-        var meshInstance = new MeshInstance3D
-        {
-            Name = name,
-            Position = position,
-            Mesh = new BoxMesh { Size = size },
-            MaterialOverride = new StandardMaterial3D { AlbedoColor = color, Roughness = 0.85f }
-        };
-        parent.AddChild(meshInstance);
     }
 }
