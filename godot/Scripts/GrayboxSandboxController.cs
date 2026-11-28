@@ -1,16 +1,19 @@
 using Godot;
+using GroundUp.Core.Bolting;
 using GroundUp.Core.Climbing;
 using GroundUp.Core.Gear;
 using GroundUp.Core.Geology;
 using GroundUp.Core.Physics;
 using GroundUp.Core.Samples;
+using GroundUp.Core.Scoring;
+using GroundUp.Core.Stamina;
 
 namespace GroundUp.GodotClient;
 
 /// <summary>
-/// Phase 1 playable scene controller ("The 10-Meter Graybox Wall"):
-/// connects player input, 3D feature raycasting, IK climber visuals, rope physics, close-up inspection camera,
-/// procedural rock-sounding audio, and dynamic whippers to <see cref="ClimbingSession"/>.
+/// Phase 1/2 playable controller: unites 4-limb climbing, close-up rock cleaning, trad/aid protection,
+/// multi-stage ground-up hand-drilling (position -> hammer/auto-rotate -> blow dust -> wrench nut -> clip draw),
+/// Module 3 First Free Ascent (FFA) redpointing, and the 1.0-4.0 Star-Rating modal.
 /// </summary>
 public partial class GrayboxSandboxController : Node3D
 {
@@ -24,20 +27,25 @@ public partial class GrayboxSandboxController : Node3D
     private WhipperAnimator _whipperAnimator = null!;
     private RockSoundSynth _soundSynth = null!;
     private ClimbingHudController _hud = null!;
+    private RouteCompletionModal _routeModal = null!;
 
     private LimbSlot? _manualLimbOverride;
     private GearKind _selectedGearCategory = GearKind.Cam;
-    private int _selectedGearIndexInCategory = 5; // Default to #0.75 Green Cam
+    private int _selectedGearIndexInCategory = 5; // Default #0.75 Green Cam
     private bool _isRightMouseOrbiting;
+    private float _hammerAudioCooldownSec;
+    private bool _ffaModalShownForCurrentTopout;
 
     private string? _hoveredFeatureId;
     private float _hoveredNormalizedPos = 0.5f;
     private Vector3? _hoveredWorldPoint;
+    private Vector3? _hoveredWallLocalSpot;
+    private string? _hoveredBoltId;
     private string? _lockedInspectFeatureId;
 
     public override void _Ready()
     {
-        InitializeSimulation();
+        InitializeFreshCliff();
         SetupEnvironmentAndLighting();
 
         _cliffBuilder = new CliffGrayboxBuilder { Name = "CliffGrayboxBuilder" };
@@ -62,14 +70,40 @@ public partial class GrayboxSandboxController : Node3D
         _hud = new ClimbingHudController { Name = "ClimbingHUD" };
         _hud.ToggleStanceRequested += HandleToggleStance;
         _hud.WeightGearRequested += HandleWeightGear;
+        _hud.ClipQuickdrawRequested += HandleClipQuickdraw;
+        _hud.BlowDustRequested += HandleBlowDust;
+        _hud.InsertOrTorqueBoltRequested += HandleInsertOrTorqueBolt;
+        _hud.ToggleAscentModeRequested += HandleToggleAscentMode;
+        _hud.ToggleDevPowerDrillRequested += HandleToggleDevPowerDrill;
         _hud.CyclePumpPresetRequested += () => _session.CyclePumpPreset();
-        _hud.ResetClimbRequested += HandleFullReset;
+        _hud.ResetClimbRequested += HandleLowerToGround;
         _hud.HotkeySlotPressed += HandleToolSlotSelected;
         AddChild(_hud);
+
+        _routeModal = new RouteCompletionModal { Name = "RouteCompletionModal" };
+        _routeModal.ClimbAgainFfaRequested += () =>
+        {
+            _ffaModalShownForCurrentTopout = false;
+            _session.StartFirstFreeAscentAttempt();
+            _cameraRig.ResetScoutOffset();
+        };
+        _routeModal.ReturnToDevRequested += () =>
+        {
+            _ffaModalShownForCurrentTopout = false;
+            _session.ReturnToRouteDevelopmentMode();
+            _cameraRig.ResetScoutOffset();
+        };
+        _routeModal.WipeFreshWallRequested += HandleFullWipeCliff;
+        AddChild(_routeModal);
     }
 
     public override void _UnhandledInput(InputEvent @event)
     {
+        if (_routeModal.IsOpen || GetViewport().GuiGetFocusOwner() is LineEdit)
+        {
+            return;
+        }
+
         if (@event is InputEventMouseButton mb)
         {
             if (mb.ButtonIndex == MouseButton.Right)
@@ -128,22 +162,32 @@ public partial class GrayboxSandboxController : Node3D
     public override void _Process(double delta)
     {
         float dt = (float)delta;
+        bool textInputFocused = _routeModal.IsOpen || GetViewport().GuiGetFocusOwner() is LineEdit;
 
-        // Vertical scouting look-ahead with W / S keys.
-        float verticalInput = 0f;
-        if (Input.IsPhysicalKeyPressed(Key.W))
+        if (!textInputFocused)
         {
-            verticalInput += 3.2f * dt;
-        }
+            // Vertical scouting look-ahead with W / S keys.
+            float verticalInput = 0f;
+            if (Input.IsPhysicalKeyPressed(Key.W))
+            {
+                verticalInput += 3.2f * dt;
+            }
 
-        if (Input.IsPhysicalKeyPressed(Key.S))
-        {
-            verticalInput -= 3.2f * dt;
-        }
+            if (Input.IsPhysicalKeyPressed(Key.S))
+            {
+                verticalInput -= 3.2f * dt;
+            }
 
-        if (Mathf.Abs(verticalInput) > 0.0001f)
-        {
-            _cameraRig.AdjustVerticalLookOffset(verticalInput);
+            if (Mathf.Abs(verticalInput) > 0.0001f)
+            {
+                _cameraRig.AdjustVerticalLookOffset(verticalInput);
+            }
+
+            // Control 2 of Bolting: Hold SPACE to operate hammer (with automatic quarter-turn drill bit rotation!).
+            if (Input.IsPhysicalKeyPressed(Key.Space) && _session.Mode == SessionMode.DrillingBolt)
+            {
+                TickActiveHammerDrilling(dt);
+            }
         }
 
         UpdateMouseHoverRaycast();
@@ -170,7 +214,21 @@ public partial class GrayboxSandboxController : Node3D
             _climberRig.SyncFromSession(_session, _hoveredWorldPoint, dt);
         }
 
-        bool ropeTaut = _session.Mode == SessionMode.HangingOnGear || _whipperAnimator.IsRopeCurrentlyTaut;
+        // Pop open the FFA Naming & Star-Rating Modal as soon as a clean First Free Ascent reaches ToppedOut!
+        if (_session.HasCompletedCleanFfa && _session.Mode == SessionMode.ToppedOut && !_ffaModalShownForCurrentTopout)
+        {
+            _ffaModalShownForCurrentTopout = true;
+            RouteEvaluationReport report = RouteStarRatingEvaluator.EvaluateRoute(
+                _cliff,
+                _session.ActiveProtectionChain,
+                _session.ClimbedFeatureIds);
+            _routeModal.ShowEvaluation(report);
+        }
+
+        bool ropeTaut = (_session.Mode == SessionMode.HangingOnGear)
+            || (_session.Mode == SessionMode.DrillingBolt && _session.ActiveWeightedPiece is not null)
+            || _whipperAnimator.IsRopeCurrentlyTaut;
+
         _ropeRenderer.SyncRopeAndGear(_session, _climberRig.HarnessWorldPosition, ropeTaut);
 
         Vector3? inspectFocus = ResolveCloseUpCameraFocus();
@@ -192,9 +250,17 @@ public partial class GrayboxSandboxController : Node3D
         }
 
         _cliffBuilder.TickDebris(dt);
-        _cliffBuilder.RefreshVisuals(_cliff, _session, _hoveredFeatureId, _hoveredNormalizedPos, hoveredMoveValid);
+        _cliffBuilder.RefreshVisuals(
+            _cliff,
+            _session,
+            _hoveredFeatureId,
+            _hoveredNormalizedPos,
+            hoveredMoveValid,
+            _hoveredWallLocalSpot,
+            _hoveredBoltId);
 
         RockFeatureBase? hoveredFeature = _hoveredFeatureId is not null ? _cliff.FindFeature(_hoveredFeatureId) : null;
+        BoltInstallation? hoveredBolt = _hoveredBoltId is not null ? _cliff.FindBoltInstallation(_hoveredBoltId) : null;
         PlacementEvaluation? hoveredEval = (_session.SelectedTool == ActiveToolKind.PlaceGear && _session.SelectedGear is not null && hoveredFeature is not null)
             ? _session.PreviewPlacement(_session.SelectedGear, hoveredFeature.Id, _hoveredNormalizedPos)
             : null;
@@ -207,12 +273,37 @@ public partial class GrayboxSandboxController : Node3D
             hoveredEval,
             hoveredMoveValid,
             predictedLimb,
-            movePreviewDiag);
+            movePreviewDiag,
+            hoveredBolt);
     }
 
-    private void InitializeSimulation()
+    private void TickActiveHammerDrilling(float dt)
+    {
+        _hammerAudioCooldownSec -= dt;
+        if (_session.TryOperateDrillHammer(dt))
+        {
+            float spinRate = _session.EquippedDrill.IsPowerTool ? 780f : 135f;
+            _cliffBuilder.AdvanceDrillBitVisualSpin(spinRate * dt);
+
+            float strikeInterval = _session.EquippedDrill.IsPowerTool ? 0.08f : 0.28f;
+            if (_hammerAudioCooldownSec <= 0f && _session.ActiveBoltTarget is not null)
+            {
+                _hammerAudioCooldownSec = strikeInterval;
+                _soundSynth.PlayDrillStrike(_session.EquippedDrill.IsPowerTool, _session.ActiveBoltTarget.DepthProgressRatio);
+            }
+        }
+        else if (_session.Mode == SessionMode.WhipperFall)
+        {
+            _soundSynth.PlayGearBlowout();
+            _whipperAnimator.BeginWhipper(_session, _climberRig.FocusPelvisWorldPosition, _soundSynth);
+        }
+    }
+
+    private void InitializeFreshCliff()
     {
         PumpDifficultyPreset preservedPreset = _session?.PumpPreset ?? PumpDifficultyPreset.Standard;
+        IDrillTool preservedDrill = _session?.EquippedDrill ?? new HandDrillTool();
+
         _cliff = TestCliffFactory.CreateTenMeterGraniteWall();
         _session = new ClimbingSession(_cliff);
         if (preservedPreset != PumpDifficultyPreset.Standard)
@@ -220,8 +311,14 @@ public partial class GrayboxSandboxController : Node3D
             _session.SetPumpPreset(preservedPreset);
         }
 
+        if (preservedDrill.IsPowerTool)
+        {
+            _session.SetDevDrillTool(preservedDrill);
+        }
+
         _manualLimbOverride = null;
         _lockedInspectFeatureId = null;
+        _ffaModalShownForCurrentTopout = false;
     }
 
     private void HandlePrimaryClick()
@@ -229,6 +326,40 @@ public partial class GrayboxSandboxController : Node3D
         if (_session.Mode is SessionMode.WhipperFall or SessionMode.ToppedOut)
         {
             return;
+        }
+
+        // Control 1 of Bolting: Left-Click positions the drill bit on any reachable spot on the rock face!
+        if (_session.SelectedTool == ActiveToolKind.BoltDrill && _session.CurrentAscentMode == AscentMode.RouteDevelopment)
+        {
+            if (_hoveredBoltId is not null && _cliff.FindBoltInstallation(_hoveredBoltId) is BoltInstallation existingBolt)
+            {
+                _session.TryPositionDrillAtWallPoint(existingBolt.WallLocalPositionMeters, out _);
+                return;
+            }
+
+            if (_hoveredWallLocalSpot.HasValue)
+            {
+                _session.TryPositionDrillAtWallPoint(_hoveredWallLocalSpot.Value.ToCore(), out _);
+            }
+
+            return;
+        }
+
+        // Single-click quickdraw clipping when clicking directly on a pre-hung bolt quickdraw!
+        if (_hoveredBoltId is not null && _cliff.FindBoltInstallation(_hoveredBoltId) is BoltInstallation clickedBolt)
+        {
+            if (clickedBolt.HasQuickdraw && _session.TryClipBoltQuickdraw(clickedBolt.Id))
+            {
+                _soundSynth.PlayQuickdrawClip();
+                return;
+            }
+
+            if (_session.CurrentAscentMode == AscentMode.RouteDevelopment &&
+                _session.Mode is SessionMode.StanceInspect or SessionMode.CleaningAndGear or SessionMode.HangingOnGear or SessionMode.DrillingBolt)
+            {
+                _session.TryPositionDrillAtWallPoint(clickedBolt.WallLocalPositionMeters, out _);
+                return;
+            }
         }
 
         if (_hoveredFeatureId is null)
@@ -267,7 +398,6 @@ public partial class GrayboxSandboxController : Node3D
             return;
         }
 
-        // In StanceInspect / CleaningAndGear (or HangingOnGear with a tool active):
         _lockedInspectFeatureId = _hoveredFeatureId;
         switch (_session.SelectedTool)
         {
@@ -323,11 +453,23 @@ public partial class GrayboxSandboxController : Node3D
             case Key.G:
                 HandleWeightGear();
                 break;
+            case Key.B:
+                HandleBlowDust();
+                break;
+            case Key.T:
+                HandleInsertOrTorqueBolt();
+                break;
+            case Key.V:
+                HandleClipQuickdraw();
+                break;
+            case Key.M:
+                HandleToggleAscentMode();
+                break;
             case Key.P:
                 _session.CyclePumpPreset();
                 break;
             case Key.R:
-                HandleFullReset();
+                HandleLowerToGround();
                 break;
             case Key.F3:
                 _hud.ShowTelemetry = !_hud.ShowTelemetry;
@@ -371,12 +513,70 @@ public partial class GrayboxSandboxController : Node3D
             case Key.Key7:
                 HandleToolSlotSelected(7);
                 break;
+            case Key.Key8:
+                HandleToolSlotSelected(8);
+                break;
             case Key.Bracketleft:
                 CycleGearInCategory(-1);
                 break;
             case Key.Bracketright:
                 CycleGearInCategory(+1);
                 break;
+        }
+    }
+
+    private void HandleBlowDust()
+    {
+        if (_session.ActiveBoltTarget is BoltInstallation bolt && _session.TryBlowOutActiveHole())
+        {
+            _cliffBuilder.SpawnDustPuff(bolt.WorldPositionMeters.ToGodot());
+            _soundSynth.PlayBlowTubePuff();
+        }
+    }
+
+    private void HandleInsertOrTorqueBolt()
+    {
+        BoltInstallStage? before = _session.ActiveBoltTarget?.Stage;
+        if (_session.TryInsertOrTightenActiveBolt(0.36f))
+        {
+            bool justCompletedTorque = before == BoltInstallStage.BoltInsertedUntorqued
+                && _session.ActiveBoltTarget?.Stage == BoltInstallStage.NutTightened;
+            _soundSynth.PlayWrenchRatchet(justCompletedTorque);
+        }
+    }
+
+    private void HandleClipQuickdraw()
+    {
+        if (_session.TryClipBoltQuickdraw(_hoveredBoltId))
+        {
+            _soundSynth.PlayQuickdrawClip();
+        }
+    }
+
+    private void HandleToggleAscentMode()
+    {
+        _ffaModalShownForCurrentTopout = false;
+        if (_session.CurrentAscentMode == AscentMode.RouteDevelopment)
+        {
+            _session.StartFirstFreeAscentAttempt();
+        }
+        else
+        {
+            _session.ReturnToRouteDevelopmentMode();
+        }
+
+        _cameraRig.ResetScoutOffset();
+    }
+
+    private void HandleToggleDevPowerDrill()
+    {
+        if (_session.EquippedDrill.IsPowerTool)
+        {
+            _session.SetDevDrillTool(new HandDrillTool());
+        }
+        else
+        {
+            _session.SetDevDrillTool(new CordlessPowerDrillTool());
         }
     }
 
@@ -398,7 +598,7 @@ public partial class GrayboxSandboxController : Node3D
             _lockedInspectFeatureId = _hoveredFeatureId;
             _session.TryLockThreePointStance();
         }
-        else if (_session.Mode is SessionMode.StanceInspect or SessionMode.CleaningAndGear or SessionMode.HangingOnGear)
+        else if (_session.Mode is SessionMode.StanceInspect or SessionMode.CleaningAndGear or SessionMode.HangingOnGear or SessionMode.DrillingBolt)
         {
             _lockedInspectFeatureId = null;
             _session.ReturnToFreeClimbing();
@@ -415,9 +615,16 @@ public partial class GrayboxSandboxController : Node3D
         }
     }
 
-    private void HandleFullReset()
+    private void HandleLowerToGround()
     {
-        InitializeSimulation();
+        _ffaModalShownForCurrentTopout = false;
+        _session.ResetToGround();
+        _cameraRig.ResetScoutOffset();
+    }
+
+    private void HandleFullWipeCliff()
+    {
+        InitializeFreshCliff();
         _cliffBuilder.BuildCliff(_cliff);
         _cameraRig.ResetScoutOffset();
     }
@@ -452,6 +659,9 @@ public partial class GrayboxSandboxController : Node3D
             case 7:
                 SelectGearCategory(GearKind.Sling);
                 break;
+            case 8:
+                _session.SelectWorkTool(ActiveToolKind.BoltDrill);
+                break;
         }
     }
 
@@ -482,10 +692,12 @@ public partial class GrayboxSandboxController : Node3D
 
     private void UpdateMouseHoverRaycast()
     {
-        if (DisplayServer.GetName() == "headless")
+        if (DisplayServer.GetName() == "headless" || _routeModal.IsOpen)
         {
             _hoveredFeatureId = null;
             _hoveredWorldPoint = null;
+            _hoveredWallLocalSpot = null;
+            _hoveredBoltId = null;
             return;
         }
 
@@ -494,29 +706,64 @@ public partial class GrayboxSandboxController : Node3D
         Vector3 from = _cameraRig.Camera.ProjectRayOrigin(mousePos);
         Vector3 to = from + (_cameraRig.Camera.ProjectRayNormal(mousePos) * 28f);
 
-        var query = PhysicsRayQueryParameters3D.Create(from, to, CliffGrayboxBuilder.FeatureCollisionLayer);
-        Godot.Collections.Dictionary hit = GetWorld3D().DirectSpaceState.IntersectRay(query);
+        PhysicsDirectSpaceState3D space = GetWorld3D().DirectSpaceState;
 
-        if (hit.Count > 0 && hit["collider"].AsGodotObject() is Node collider && collider.HasMeta("feature_id"))
-        {
-            string id = collider.GetMeta("feature_id").AsString();
-            Vector3 worldHit = hit["position"].AsVector3();
-            RockFeatureBase? feat = _cliff.FindFeature(id);
-            if (feat is not null)
-            {
-                _hoveredFeatureId = id;
-                _hoveredNormalizedPos = _cliffBuilder.GetNormalizedPositionFromWorldHit(feat, worldHit);
-                _hoveredWorldPoint = _cliff.GetFeatureWorldPositionMeters(feat, _hoveredNormalizedPos).ToGodot();
-                return;
-            }
-        }
+        // 1. Raycast features and installed bolts.
+        var featQuery = PhysicsRayQueryParameters3D.Create(from, to, CliffGrayboxBuilder.FeatureCollisionLayer);
+        Godot.Collections.Dictionary featHit = space.IntersectRay(featQuery);
 
         _hoveredFeatureId = null;
         _hoveredWorldPoint = null;
+        _hoveredBoltId = null;
+
+        if (featHit.Count > 0 && featHit["collider"].AsGodotObject() is Node collider)
+        {
+            if (collider.HasMeta("bolt_id"))
+            {
+                _hoveredBoltId = collider.GetMeta("bolt_id").AsString();
+                if (_cliff.FindBoltInstallation(_hoveredBoltId) is BoltInstallation b)
+                {
+                    _hoveredWorldPoint = b.WorldPositionMeters.ToGodot();
+                }
+            }
+            else if (collider.HasMeta("feature_id"))
+            {
+                string id = collider.GetMeta("feature_id").AsString();
+                Vector3 worldHit = featHit["position"].AsVector3();
+                if (_cliff.FindFeature(id) is RockFeatureBase feat)
+                {
+                    _hoveredFeatureId = id;
+                    _hoveredNormalizedPos = _cliffBuilder.GetNormalizedPositionFromWorldHit(feat, worldHit);
+                    _hoveredWorldPoint = _cliff.GetFeatureWorldPositionMeters(feat, _hoveredNormalizedPos).ToGodot();
+                }
+            }
+        }
+
+        // 2. Raycast wall surface for open-face bolt drill positioning.
+        var wallQuery = PhysicsRayQueryParameters3D.Create(from, to, CliffGrayboxBuilder.WallSurfaceCollisionLayer);
+        Godot.Collections.Dictionary wallHit = space.IntersectRay(wallQuery);
+        if (wallHit.Count > 0)
+        {
+            Vector3 wallWorld = wallHit["position"].AsVector3();
+            _hoveredWallLocalSpot = _cliffBuilder.WallRoot.ToLocal(wallWorld);
+            if (_hoveredWorldPoint is null && _session.SelectedTool == ActiveToolKind.BoltDrill)
+            {
+                _hoveredWorldPoint = wallWorld;
+            }
+        }
+        else
+        {
+            _hoveredWallLocalSpot = null;
+        }
     }
 
     private Vector3? ResolveCloseUpCameraFocus()
     {
+        if (_session.Mode == SessionMode.DrillingBolt && _session.ActiveBoltTarget is not null)
+        {
+            return _session.ActiveBoltTarget.WorldPositionMeters.ToGodot();
+        }
+
         if (_hoveredWorldPoint.HasValue)
         {
             return _hoveredWorldPoint.Value;

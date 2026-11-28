@@ -157,6 +157,13 @@ public partial class ClimberVisualRig : Node3D
                 _ => pelvisWorld + new Vector3(0.28f, 0.10f, -0.05f)
             };
         }
+        else if (session.Mode == SessionMode.DrillingBolt && session.ActiveBoltTarget is not null &&
+                 (session.FreeWorkHand == slot || (session.FreeWorkHand is null && slot == LimbSlot.RightHand)))
+        {
+            Vector3 drillTarget = session.ActiveBoltTarget.WorldPositionMeters.ToGodot() + (outward * 0.10f);
+            float strikeBob = Mathf.Sin(_swayClock * 22f) * 0.025f;
+            desiredTarget = drillTarget + new Vector3(0f, strikeBob, strikeBob * 0.6f);
+        }
         else if (session.FreeWorkHand == slot && hoveredTargetWorld.HasValue &&
                  session.Mode is SessionMode.StanceInspect or SessionMode.CleaningAndGear)
         {
@@ -238,9 +245,12 @@ public partial class ClimberVisualRig : Node3D
 
     private void UpdateHeldToolVisual(ClimbingSession session)
     {
-        if (session.FreeWorkHand is not LimbSlot freeHand ||
+        LimbSlot? activeToolHand = session.FreeWorkHand
+            ?? (session.Mode == SessionMode.DrillingBolt ? LimbSlot.RightHand : null);
+
+        if (activeToolHand is not LimbSlot freeHand ||
             session.SelectedTool == ActiveToolKind.None ||
-            session.Mode is not SessionMode.CleaningAndGear and not SessionMode.StanceInspect)
+            session.Mode is not SessionMode.CleaningAndGear and not SessionMode.StanceInspect and not SessionMode.DrillingBolt)
         {
             _heldToolMesh.Visible = false;
             return;
@@ -255,6 +265,9 @@ public partial class ClimberVisualRig : Node3D
             ActiveToolKind.HammerSound => new Color(0.75f, 0.78f, 0.84f),
             ActiveToolKind.WireBrush => new Color(0.88f, 0.68f, 0.24f),
             ActiveToolKind.Prybar => new Color(0.88f, 0.28f, 0.22f),
+            ActiveToolKind.BoltDrill => session.EquippedDrill.IsPowerTool
+                ? new Color(0.95f, 0.72f, 0.12f)
+                : new Color(0.70f, 0.76f, 0.86f),
             ActiveToolKind.PlaceGear when session.SelectedGear is not null => GodotMathAdapter.GetGearHardwareColor(session.SelectedGear),
             _ => new Color(0.8f, 0.8f, 0.8f)
         };

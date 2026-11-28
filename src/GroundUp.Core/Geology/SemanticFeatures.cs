@@ -1,4 +1,6 @@
 using System.Numerics;
+using GroundUp.Core.Bolting;
+using GroundUp.Core.Gear;
 
 namespace GroundUp.Core.Geology;
 
@@ -316,6 +318,7 @@ public sealed class StanceFeature : RockFeatureBase
 public sealed class CliffFace
 {
     private readonly List<RockFeatureBase> _features = [];
+    private readonly List<BoltInstallation> _boltInstallations = [];
 
     public string Name { get; }
     public float WidthMeters { get; }
@@ -350,6 +353,67 @@ public sealed class CliffFace
     }
 
     public IReadOnlyList<RockFeatureBase> Features => _features;
+
+    public IReadOnlyList<BoltInstallation> BoltInstallations => _boltInstallations;
+
+    /// <summary>
+    /// Samples rock substrate integrity at a cliff-local drill coordinate.
+    /// Drilling into or immediately over an un-trundled hollow choss feature compromises the bolt!
+    /// </summary>
+    public float SampleRockIntegrityAtWallPosition(Vector3 wallLocalPositionMeters)
+    {
+        float minIntegrity = 0.96f;
+        foreach (RockFeatureBase feature in _features)
+        {
+            if (feature.IsTrundled || feature.StructuralIntegrity >= 0.85f)
+            {
+                continue;
+            }
+
+            float hazardRadiusMeters = feature is EdgeFeature edge
+                ? Math.Clamp((edge.WidthMillimeters / 1000f) + 0.38f, 0.35f, 0.72f)
+                : 0.42f;
+
+            float dx = wallLocalPositionMeters.X - feature.PositionMeters.X;
+            float dy = wallLocalPositionMeters.Y - feature.PositionMeters.Y;
+            float planarDist = MathF.Sqrt((dx * dx) + (dy * dy));
+            if (planarDist <= hazardRadiusMeters)
+            {
+                minIntegrity = MathF.Min(minIntegrity, feature.StructuralIntegrity);
+            }
+        }
+
+        return minIntegrity;
+    }
+
+    public BoltInstallation StartOrFindBoltHole(BoltSpec spec, Vector3 wallLocalPositionMeters, float snapRadiusMeters = 0.22f)
+    {
+        ArgumentNullException.ThrowIfNull(spec);
+        Vector3 clampedLocal = new(
+            Math.Clamp(wallLocalPositionMeters.X, (-WidthMeters * 0.5f) + 0.20f, (WidthMeters * 0.5f) - 0.20f),
+            Math.Clamp(wallLocalPositionMeters.Y, 0.75f, HeightMeters - 0.15f),
+            0f);
+
+        Vector3 worldPos = WallToWorldPositionMeters(clampedLocal);
+        BoltInstallation? nearbyExisting = _boltInstallations
+            .FirstOrDefault(b => Vector3.Distance(b.WorldPositionMeters, worldPos) <= snapRadiusMeters);
+
+        if (nearbyExisting is not null)
+        {
+            return nearbyExisting;
+        }
+
+        string id = $"bolt-{_boltInstallations.Count + 1}";
+        float integrity = SampleRockIntegrityAtWallPosition(clampedLocal);
+        var created = new BoltInstallation(id, spec, clampedLocal, worldPos, integrity);
+        _boltInstallations.Add(created);
+        return created;
+    }
+
+    public BoltInstallation? FindBoltInstallation(string boltId) =>
+        _boltInstallations.FirstOrDefault(b => string.Equals(b.Id, boltId, StringComparison.Ordinal));
+
+    public void ClearBoltInstallations() => _boltInstallations.Clear();
 
     /// <summary>
     /// Outward surface normal pointing from the rock face toward the climber (+Z when vertical).

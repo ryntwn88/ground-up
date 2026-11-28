@@ -99,6 +99,35 @@ public partial class RockSoundSynth : Node
         PushSimpleBurst(freqHz: 310f, durationSec: 0.18f, decay: 15f, noiseMix: 0.48f);
     }
 
+    public void PlayDrillStrike(bool isPowerDrill, float depthProgressRatio)
+    {
+        if (isPowerDrill)
+        {
+            PushSimpleBurst(freqHz: 185f + (depthProgressRatio * 60f), durationSec: 0.07f, decay: 18f, noiseMix: 0.35f);
+        }
+        else
+        {
+            // Crisp steel hammer-on-chromoly ring that shifts pitch slightly as hole deepens.
+            PushSimpleBurst(freqHz: 1580f + (depthProgressRatio * 280f), durationSec: 0.085f, decay: 28f, noiseMix: 0.10f);
+        }
+    }
+
+    public void PlayBlowTubePuff()
+    {
+        PushSimpleBurst(freqHz: 640f, durationSec: 0.18f, decay: 14f, noiseMix: 0.90f);
+    }
+
+    public void PlayWrenchRatchet(bool finishedTorque)
+    {
+        float freq = finishedTorque ? 1320f : 890f;
+        PushSimpleBurst(freqHz: freq, durationSec: 0.09f, decay: 26f, noiseMix: 0.18f);
+    }
+
+    public void PlayQuickdrawClip()
+    {
+        PushSimpleBurst(freqHz: 1760f, durationSec: 0.07f, decay: 32f, noiseMix: 0.08f);
+    }
+
     private void PushSimpleBurst(float freqHz, float durationSec, float decay, float noiseMix)
     {
         if (!_audioAvailable || _playback is null)

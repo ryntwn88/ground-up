@@ -55,7 +55,7 @@ public partial class HybridClimbingCamera : Node3D
         Vector3? inspectTargetWorld,
         float deltaSeconds)
     {
-        bool closeUpInspect = session.Mode is SessionMode.StanceInspect or SessionMode.CleaningAndGear;
+        bool closeUpInspect = session.Mode is SessionMode.StanceInspect or SessionMode.CleaningAndGear or SessionMode.DrillingBolt;
 
         Vector3 desiredLookTarget;
         float desiredDistance;

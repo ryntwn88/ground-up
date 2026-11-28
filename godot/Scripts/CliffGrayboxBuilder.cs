@@ -1,4 +1,5 @@
 using Godot;
+using GroundUp.Core.Bolting;
 using GroundUp.Core.Climbing;
 using GroundUp.Core.Gear;
 using GroundUp.Core.Geology;
@@ -7,12 +8,13 @@ using GroundUp.Core.Physics;
 namespace GroundUp.GodotClient;
 
 /// <summary>
-/// Synthesizes 3D graybox cliff geometry, raycastable feature pick colliders, moss/trundle visual state,
-/// and diegetic close-up gear-fit ghosts directly from semantic <see cref="CliffFace"/> parameters.
+/// Synthesizes 3D graybox cliff geometry, raycastable feature & wall-face pick colliders, moss/trundle visual state,
+/// progressive bolt-drilling / hanger / nut / quickdraw visuals, and diegetic gear-fit ghosts.
 /// </summary>
 public partial class CliffGrayboxBuilder : Node3D
 {
     public const uint FeatureCollisionLayer = 2;
+    public const uint WallSurfaceCollisionLayer = 4;
 
     private sealed class FeatureVisualEntry
     {
@@ -35,6 +37,7 @@ public partial class CliffGrayboxBuilder : Node3D
     }
 
     private readonly Dictionary<string, FeatureVisualEntry> _entries = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, Node3D> _boltVisualNodes = new(StringComparer.Ordinal);
     private readonly List<FallingDebrisItem> _debris = [];
 
     private Node3D _placementGhostRoot = null!;
@@ -44,6 +47,9 @@ public partial class CliffGrayboxBuilder : Node3D
     private StandardMaterial3D _ghostMaterial = null!;
     private MeshInstance3D _climbCursorPip = null!;
     private StandardMaterial3D _climbCursorPipMaterial = null!;
+    private MeshInstance3D _drillAimReticle = null!;
+    private StandardMaterial3D _drillAimMaterial = null!;
+    private float _autoDrillSpinDegrees;
 
     public Node3D WallRoot { get; private set; } = null!;
 
@@ -55,6 +61,7 @@ public partial class CliffGrayboxBuilder : Node3D
         }
 
         _entries.Clear();
+        _boltVisualNodes.Clear();
         _debris.Clear();
 
         // Ground terrain + bouldering/belay crash pad at cliff base.
@@ -74,6 +81,21 @@ public partial class CliffGrayboxBuilder : Node3D
             new Vector3(cliff.WidthMeters, cliff.HeightMeters, 0.9f),
             new Vector3(0f, cliff.HeightMeters * 0.5f, -0.45f),
             new Color(0.44f, 0.45f, 0.48f));
+
+        // Raycastable wall surface body so the player can position the bolt drill anywhere on open rock face!
+        var wallPickBody = new StaticBody3D
+        {
+            Name = "GraniteWallSurfacePick",
+            Position = new Vector3(0f, cliff.HeightMeters * 0.5f, -0.02f),
+            CollisionLayer = WallSurfaceCollisionLayer,
+            CollisionMask = 0
+        };
+        wallPickBody.SetMeta("wall_surface", true);
+        wallPickBody.AddChild(new CollisionShape3D
+        {
+            Shape = new BoxShape3D { Size = new Vector3(cliff.WidthMeters, cliff.HeightMeters, 0.06f) }
+        });
+        WallRoot.AddChild(wallPickBody);
 
         // Subtle 2m elevation tick markers on left/right cliff edges to help judge runout height.
         for (int h = 2; h <= 10; h += 2)
@@ -105,12 +127,46 @@ public partial class CliffGrayboxBuilder : Node3D
         return crack.GetNormalizedPositionForWorldHeight(localHit.Y);
     }
 
+    public void AdvanceDrillBitVisualSpin(float degreesDelta)
+    {
+        _autoDrillSpinDegrees = (_autoDrillSpinDegrees + degreesDelta) % 360f;
+    }
+
+    public void SpawnDustPuff(Vector3 worldPos)
+    {
+        for (int i = 0; i < 5; i++)
+        {
+            var puff = new MeshInstance3D
+            {
+                Mesh = new SphereMesh { Radius = 0.035f + (i * 0.008f), Height = 0.07f + (i * 0.016f) },
+                MaterialOverride = new StandardMaterial3D
+                {
+                    Transparency = BaseMaterial3D.TransparencyEnum.Alpha,
+                    AlbedoColor = new Color(0.88f, 0.88f, 0.86f, 0.68f),
+                    Roughness = 1.0f
+                }
+            };
+            AddChild(puff);
+            puff.GlobalPosition = worldPos + new Vector3((i - 2) * 0.03f, (i % 2) * 0.02f, 0.06f);
+
+            _debris.Add(new FallingDebrisItem
+            {
+                Mesh = puff,
+                Velocity = new Vector3((i - 2) * 0.35f, 0.35f + (i * 0.08f), 1.15f + (i * 0.15f)),
+                SpinRadiansPerSec = Vector3.Zero,
+                RemainingSeconds = 0.55f
+            });
+        }
+    }
+
     public void RefreshVisuals(
         CliffFace cliff,
         ClimbingSession session,
         string? hoveredFeatureId,
         float hoveredNormalizedPos,
-        bool? hoveredMoveIsValid = null)
+        bool? hoveredMoveIsValid = null,
+        Vector3? hoveredWallLocalSpot = null,
+        string? hoveredBoltId = null)
     {
         Color validHoverEmission = new(0.28f, 0.95f, 0.68f);
         Color blockedHoverEmission = new(0.95f, 0.36f, 0.22f);
@@ -179,6 +235,7 @@ public partial class CliffGrayboxBuilder : Node3D
 
         UpdateClimbCursorPip(cliff, session, hoveredFeatureId, hoveredNormalizedPos, hoveredMoveIsValid);
         UpdatePlacementGhost(cliff, session, hoveredFeatureId, hoveredNormalizedPos);
+        UpdateDrillReticleAndBolts(cliff, session, hoveredWallLocalSpot, hoveredBoltId);
     }
 
     public void TickDebris(float deltaSeconds)
@@ -435,6 +492,242 @@ public partial class CliffGrayboxBuilder : Node3D
             MaterialOverride = _climbCursorPipMaterial
         };
         AddChild(_climbCursorPip);
+
+        _drillAimMaterial = new StandardMaterial3D
+        {
+            Transparency = BaseMaterial3D.TransparencyEnum.Alpha,
+            AlbedoColor = new Color(0.25f, 0.88f, 0.98f, 0.80f),
+            EmissionEnabled = true,
+            Emission = new Color(0.20f, 0.82f, 0.95f),
+            EmissionEnergyMultiplier = 0.65f
+        };
+
+        _drillAimReticle = new MeshInstance3D
+        {
+            Name = "DrillAimReticle",
+            Visible = false,
+            Mesh = new CylinderMesh { TopRadius = 0.055f, BottomRadius = 0.055f, Height = 0.015f },
+            MaterialOverride = _drillAimMaterial
+        };
+        AddChild(_drillAimReticle);
+    }
+
+    private void UpdateDrillReticleAndBolts(
+        CliffFace cliff,
+        ClimbingSession session,
+        Vector3? hoveredWallLocalSpot,
+        string? hoveredBoltId)
+    {
+        // 1. Drill positioning reticle when BoltDrill tool is selected.
+        bool showDrillAim = session.SelectedTool == ActiveToolKind.BoltDrill
+            && session.CurrentAscentMode == AscentMode.RouteDevelopment
+            && hoveredWallLocalSpot.HasValue;
+
+        if (showDrillAim)
+        {
+            Vector3 localSpot = new(hoveredWallLocalSpot!.Value.X, hoveredWallLocalSpot.Value.Y, 0f);
+            Vector3 worldSpot = cliff.WallToWorldPositionMeters(localSpot.ToCore()).ToGodot();
+            float dist = worldSpot.DistanceTo(session.Rig.CenterOfMassMeters.ToGodot());
+            bool inReach = dist <= ClimbingSession.MaxWorkReachMeters;
+
+            _drillAimReticle.Visible = true;
+            _drillAimReticle.GlobalPosition = worldSpot + (cliff.WallOutwardNormal.ToGodot() * 0.025f);
+            _drillAimReticle.RotationDegrees = new Vector3(cliff.OverhangDegrees + 90f, 0f, 0f);
+
+            Color aimCol = inReach
+                ? new Color(0.22f, 0.92f, 0.98f, 0.82f)
+                : new Color(0.95f, 0.30f, 0.22f, 0.82f);
+            _drillAimMaterial.AlbedoColor = aimCol;
+            _drillAimMaterial.Emission = new Color(aimCol.R, aimCol.G, aimCol.B);
+        }
+        else
+        {
+            _drillAimReticle.Visible = false;
+        }
+
+        // 2. Sync 3D visual nodes for all BoltInstallations on the cliff.
+        HashSet<string> activeIds = [];
+        foreach (BoltInstallation bolt in cliff.BoltInstallations)
+        {
+            activeIds.Add(bolt.Id);
+            if (!_boltVisualNodes.TryGetValue(bolt.Id, out Node3D? boltRoot))
+            {
+                boltRoot = CreateBoltVisualNode(bolt);
+                WallRoot.AddChild(boltRoot);
+                _boltVisualNodes[bolt.Id] = boltRoot;
+            }
+
+            UpdateSingleBoltVisual(boltRoot, bolt, session, string.Equals(bolt.Id, hoveredBoltId, StringComparison.Ordinal));
+        }
+
+        List<string> staleIds = _boltVisualNodes.Keys.Where(id => !activeIds.Contains(id)).ToList();
+        foreach (string stale in staleIds)
+        {
+            _boltVisualNodes[stale].QueueFree();
+            _boltVisualNodes.Remove(stale);
+        }
+    }
+
+    private static Node3D CreateBoltVisualNode(BoltInstallation bolt)
+    {
+        var root = new Node3D
+        {
+            Name = $"BoltVisual_{bolt.Id}",
+            Position = new Vector3(bolt.WallLocalPositionMeters.X, bolt.WallLocalPositionMeters.Y, 0.015f)
+        };
+
+        var bore = new MeshInstance3D
+        {
+            Name = "HoleBore",
+            RotationDegrees = new Vector3(90f, 0f, 0f),
+            Mesh = new CylinderMesh { TopRadius = 0.014f, BottomRadius = 0.014f, Height = 0.02f },
+            MaterialOverride = new StandardMaterial3D { AlbedoColor = new Color(0.10f, 0.10f, 0.12f), Roughness = 0.95f }
+        };
+
+        var dustRing = new MeshInstance3D
+        {
+            Name = "DustCollar",
+            Position = new Vector3(0f, 0f, 0.008f),
+            RotationDegrees = new Vector3(90f, 0f, 0f),
+            Mesh = new CylinderMesh { TopRadius = 0.042f, BottomRadius = 0.042f, Height = 0.008f },
+            MaterialOverride = new StandardMaterial3D
+            {
+                Transparency = BaseMaterial3D.TransparencyEnum.Alpha,
+                AlbedoColor = new Color(0.88f, 0.86f, 0.82f, 0.0f),
+                Roughness = 1.0f
+            }
+        };
+
+        var drillBit = new Node3D { Name = "SeatedDrillAssembly", Visible = false };
+        drillBit.AddChild(new MeshInstance3D
+        {
+            Position = new Vector3(0f, 0f, 0.09f),
+            RotationDegrees = new Vector3(90f, 0f, 0f),
+            Mesh = new CylinderMesh { TopRadius = 0.009f, BottomRadius = 0.016f, Height = 0.18f },
+            MaterialOverride = new StandardMaterial3D { AlbedoColor = new Color(0.86f, 0.68f, 0.16f), Metallic = 0.6f, Roughness = 0.35f }
+        });
+        drillBit.AddChild(new MeshInstance3D
+        {
+            Position = new Vector3(0f, 0f, 0.15f),
+            Mesh = new BoxMesh { Size = new Vector3(0.065f, 0.022f, 0.022f) },
+            MaterialOverride = new StandardMaterial3D { AlbedoColor = new Color(0.25f, 0.28f, 0.32f), Roughness = 0.6f }
+        });
+
+        var hanger = new MeshInstance3D
+        {
+            Name = "StainlessHanger",
+            Position = new Vector3(0f, -0.015f, 0.014f),
+            Visible = false,
+            Mesh = new BoxMesh { Size = new Vector3(0.052f, 0.072f, 0.012f) },
+            MaterialOverride = new StandardMaterial3D { AlbedoColor = new Color(0.82f, 0.86f, 0.90f), Metallic = 0.80f, Roughness = 0.25f }
+        };
+
+        var studAndNut = new MeshInstance3D
+        {
+            Name = "HexNutStud",
+            Position = new Vector3(0f, 0f, 0.045f),
+            RotationDegrees = new Vector3(90f, 0f, 0f),
+            Visible = false,
+            Mesh = new CylinderMesh { TopRadius = 0.013f, BottomRadius = 0.013f, Height = 0.026f },
+            MaterialOverride = new StandardMaterial3D { AlbedoColor = new Color(0.92f, 0.78f, 0.24f), Metallic = 0.75f, Roughness = 0.30f }
+        };
+
+        var quickdraw = new Node3D { Name = "Quickdraw", Visible = false };
+        quickdraw.AddChild(new MeshInstance3D
+        {
+            Name = "Dogbone",
+            Position = new Vector3(0f, -0.085f, 0.045f),
+            Mesh = new BoxMesh { Size = new Vector3(0.022f, 0.13f, 0.012f) },
+            MaterialOverride = new StandardMaterial3D { AlbedoColor = new Color(0.18f, 0.56f, 0.92f), Roughness = 0.65f }
+        });
+        quickdraw.AddChild(new MeshInstance3D
+        {
+            Name = "LowerBiner",
+            Position = new Vector3(0f, -0.16f, 0.055f),
+            Mesh = new BoxMesh { Size = new Vector3(0.036f, 0.055f, 0.014f) },
+            MaterialOverride = new StandardMaterial3D { AlbedoColor = new Color(0.88f, 0.90f, 0.94f), Metallic = 0.8f, Roughness = 0.25f }
+        });
+
+        var pickBody = new StaticBody3D
+        {
+            Name = "BoltPickBody",
+            CollisionLayer = FeatureCollisionLayer | WallSurfaceCollisionLayer,
+            CollisionMask = 0
+        };
+        pickBody.SetMeta("bolt_id", bolt.Id);
+        pickBody.AddChild(new CollisionShape3D
+        {
+            Position = new Vector3(0f, -0.05f, 0.04f),
+            Shape = new BoxShape3D { Size = new Vector3(0.22f, 0.28f, 0.18f) }
+        });
+
+        root.AddChild(bore);
+        root.AddChild(dustRing);
+        root.AddChild(drillBit);
+        root.AddChild(hanger);
+        root.AddChild(studAndNut);
+        root.AddChild(quickdraw);
+        root.AddChild(pickBody);
+        return root;
+    }
+
+    private void UpdateSingleBoltVisual(
+        Node3D root,
+        BoltInstallation bolt,
+        ClimbingSession session,
+        bool isHovered)
+    {
+        var dustRing = root.GetNode<MeshInstance3D>("DustCollar");
+        var dustMat = (StandardMaterial3D)dustRing.MaterialOverride;
+        bool showDust = bolt.Stage is BoltInstallStage.DrillingHole or BoltInstallStage.HoleDepthReached && bolt.DustFillRatio > 0.04f;
+        dustRing.Visible = showDust;
+        if (showDust)
+        {
+            dustMat.AlbedoColor = new Color(0.90f, 0.88f, 0.84f, Mathf.Clamp(bolt.DustFillRatio * 0.88f, 0.12f, 0.88f));
+        }
+
+        var drillAssembly = root.GetNode<Node3D>("SeatedDrillAssembly");
+        bool isActiveTarget = ReferenceEquals(session.ActiveBoltTarget, bolt) && session.Mode == SessionMode.DrillingBolt;
+        drillAssembly.Visible = isActiveTarget && bolt.Stage is BoltInstallStage.DrillingHole or BoltInstallStage.HoleDepthReached;
+        if (drillAssembly.Visible)
+        {
+            drillAssembly.RotationDegrees = new Vector3(0f, 0f, _autoDrillSpinDegrees);
+        }
+
+        var hanger = root.GetNode<MeshInstance3D>("StainlessHanger");
+        var nutStud = root.GetNode<MeshInstance3D>("HexNutStud");
+        var quickdraw = root.GetNode<Node3D>("Quickdraw");
+
+        hanger.Visible = bolt.Stage >= BoltInstallStage.BoltInsertedUntorqued;
+        nutStud.Visible = bolt.Stage >= BoltInstallStage.BoltInsertedUntorqued;
+        quickdraw.Visible = bolt.Stage == BoltInstallStage.QuickdrawHung;
+
+        if (nutStud.Visible)
+        {
+            // Nut threads visibly inward along the stud as torque increases from 0% to 100%!
+            float zOut = Mathf.Lerp(0.052f, 0.022f, bolt.NutTorqueRatio);
+            nutStud.Position = new Vector3(0f, 0f, zOut);
+            var nutMat = (StandardMaterial3D)nutStud.MaterialOverride;
+            nutMat.AlbedoColor = bolt.Stage >= BoltInstallStage.NutTightened
+                ? new Color(0.84f, 0.88f, 0.92f)
+                : new Color(0.96f, 0.68f, 0.16f);
+        }
+
+        var hangerMat = (StandardMaterial3D)hanger.MaterialOverride;
+        bool isClipped = session.PlacedGear.Any(p => string.Equals(p.Protection.FeatureId, bolt.Id, StringComparison.Ordinal));
+        float dist = bolt.WorldPositionMeters.ToGodot().DistanceTo(session.Rig.CenterOfMassMeters.ToGodot());
+        bool canClipHighlight = bolt.HasQuickdraw && !isClipped && dist <= ClimbingSession.MaxWorkReachMeters;
+
+        if (isHovered || canClipHighlight)
+        {
+            hangerMat.EmissionEnabled = true;
+            hangerMat.Emission = canClipHighlight ? new Color(0.25f, 0.95f, 0.55f) : new Color(0.65f, 0.88f, 1.0f);
+            hangerMat.EmissionEnergyMultiplier = isHovered ? 0.55f : 0.30f;
+        }
+        else
+        {
+            hangerMat.EmissionEnabled = false;
+        }
     }
 
     private void UpdateClimbCursorPip(

@@ -71,10 +71,11 @@ Instead of relying on external scan datasets, *Ground Up!* generates its own gro
 - [x] Tactile close-up camera for sounding/trundling choss, brushing moss, and slotting/weighting cams, hooks, pitons, and slings, plus dynamic whipper arrest.
 - [x] **Exit Gate:** 44 deterministic CLI xUnit scenarios verifying full auto-cursor ground-to-summit ascent, zero-foot float prevention, choss snap whippers, mossy skyhook blowouts, CoM balance pump, tunable pump presets, and gear weighting.
 
-### Phase 2: Ground-Up Bolting, FFA Mode & Route Star-Rating (Weeks 9-15)
-- Hand-drilling mechanic scaled by rock hardness, dust blow-out, stance vs. gear hang trade-offs, plus modular power-drill interface.
-- **Module 3 (Pure Free Climbing / FFA):** Climb equipped lines cleanly clipping quickdraws and placing supplemental trad gear to claim the FFA, grade, and name the route.
-- **Algorithmic Route Star-Rating Engine (1.0-4.0 Stars):** Scores safety (ground/ledge fall danger, choss bolts), clipping ergonomics, natural-pro ethics, and rock quality/flow.
+### Phase 2: Ground-Up Bolting, FFA Mode & Route Star-Rating (Weeks 9-15 — Completed)
+- [x] Hand-drilling mechanic scaled by rock hardness, dust blow-out, wrench nut torquing before quickdraw attachment, stance vs. gear hang trade-offs, plus modular power-drill interface (`F3` dev toggle).
+- [x] **Module 3 (Pure Free Climbing / FFA):** Climb equipped lines cleanly clipping quickdraws and placing supplemental trad gear to claim the FFA, grade, and name the route.
+- [x] **Algorithmic Route Star-Rating Engine (1.0-4.0 Stars):** Scores safety (ground/ledge fall danger, choss bolts), clipping ergonomics, natural-pro ethics (crack-bolting deductions), and rock quality/flow.
+- [x] **Exit Gate:** 51 deterministic CLI xUnit scenarios verifying multi-stage bolting, dust choke & blow-tube physics, nut torque gating, Develop -> FFA redpoint completion, and 1.0–4.0 Star-Rating scoring.
 
 ### Phase 3: Procedural Cliffs & Crag Exploration UX (Weeks 16-22)
 - Multi-sector procedural cliff generator (`Granite`, `Limestone`, `Sandstone`, `Basalt`).
